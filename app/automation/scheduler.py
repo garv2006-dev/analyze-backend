@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 scheduler = AsyncIOScheduler()
 
-async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIFTY50") -> StockPrediction:
+async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIFTY50", target_url: str = None) -> StockPrediction:
     """
     Core pipeline executor that orchestrates browser capture, OpenAI Vision analysis,
     database writing, and WebSocket broadcasting.
@@ -23,7 +23,8 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
     logger.info("⚡ Executing core chart analysis pipeline cycle...")
     
     # 1. Capture dynamic chart screenshot using Playwright
-    capture_result = await browser.capture_chart()
+    capture_result = await browser.capture_chart(target_url=target_url)
+
     
     # 2. Feed image to OpenAI Vision API (or dynamic offline simulation)
     ai_analysis = await ai.analyze_chart(capture_result["absolute_path"])
@@ -63,6 +64,17 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
     
     logger.info(f"💾 Prediction persisted successfully with ID #{prediction.id}")
     
+    # Clean up local screenshot immediately if it was successfully uploaded to Cloudinary
+    if image_path_to_save.startswith("http"):
+        try:
+            from pathlib import Path
+            local_file = Path(capture_result["absolute_path"])
+            if local_file.exists():
+                local_file.unlink()
+                logger.info(f"🗑️ Deleted local temporary screenshot after successful Cloudinary upload: {local_file.name}")
+        except Exception as cleanup_err:
+            logger.warning(f"⚠️ Failed to delete temporary local screenshot: {cleanup_err}")
+            
     # 4. Broadcast the newly created prediction over all active WebSockets
     prediction_dict = prediction.to_dict()
     await ws_manager.broadcast({

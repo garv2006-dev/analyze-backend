@@ -1,4 +1,6 @@
 import logging
+from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -11,6 +13,11 @@ logger.setLevel(logging.INFO)
 
 router = APIRouter()
 
+class TriggerRequest(BaseModel):
+    target_url: Optional[str] = None
+    stock_symbol: Optional[str] = None
+
+
 from typing import Optional
 from sqlalchemy import func
 from backend.app import config
@@ -20,23 +27,33 @@ async def get_predictions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     limit: Optional[int] = Query(default=None, ge=1, le=100),
+    symbol: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db)
 ):
-    """Fetches paginated list of historical stock graph predictions, ordered descending by capture time."""
-    logger.info(f"📥 GET /api/predictions?page={page}&page_size={page_size}&limit={limit} request received.")
+    """Fetches paginated list of historical stock graph predictions, ordered descending by capture time, optionally filtered by symbol."""
+    logger.info(f"📥 GET /api/predictions?page={page}&page_size={page_size}&limit={limit}&symbol={symbol} request received.")
     try:
-        # Count total predictions
+        # Build counting query
         count_query = select(func.count()).select_from(StockPrediction)
+        if symbol and symbol.upper() != 'ALL':
+            count_query = count_query.where(StockPrediction.stock_symbol == symbol.upper())
+            
         count_result = await db.execute(count_query)
         total = count_result.scalar()
 
         if limit is not None:
             # Maintain backward compatibility if limit parameter is explicitly passed
-            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc()).limit(limit)
+            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc())
+            if symbol and symbol.upper() != 'ALL':
+                query = query.where(StockPrediction.stock_symbol == symbol.upper())
+            query = query.limit(limit)
             active_page_size = limit
         else:
             offset = (page - 1) * page_size
-            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc()).offset(offset).limit(page_size)
+            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc())
+            if symbol and symbol.upper() != 'ALL':
+                query = query.where(StockPrediction.stock_symbol == symbol.upper())
+            query = query.offset(offset).limit(page_size)
             active_page_size = page_size
 
         result = await db.execute(query)
@@ -160,13 +177,17 @@ async def get_prediction_by_id(id: int, db: AsyncSession = Depends(get_db)):
         )
 
 @router.post("/trigger")
-async def trigger_manual_analysis(db: AsyncSession = Depends(get_db)):
+async def trigger_manual_analysis(request_data: Optional[TriggerRequest] = None, db: AsyncSession = Depends(get_db)):
     """Manually forces an immediate Playwright capture and OpenAI Vision analysis sequence, saving the results."""
     logger.info("📥 POST /api/predictions/trigger request received. Initiating immediate automated run...")
     try:
+        target_url = request_data.target_url if request_data else None
+        stock_symbol = request_data.stock_symbol if (request_data and request_data.stock_symbol) else "NIFTY50"
+        
         # Run core cycle using current db session
-        prediction = await execute_analysis_cycle(db)
+        prediction = await execute_analysis_cycle(db, stock_symbol=stock_symbol, target_url=target_url)
         await db.commit()
+
         
         return {
             "success": True,

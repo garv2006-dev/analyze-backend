@@ -8,7 +8,7 @@ from backend.app import config
 logger = logging.getLogger("Browser")
 logger.setLevel(logging.INFO)
 
-def _sync_capture_chart() -> dict:
+def _sync_capture_chart(target_url: str = None) -> dict:
     """Synchronous worker that executes the async playwright capture inside a ProactorEventLoop."""
     import sys
     
@@ -19,11 +19,11 @@ def _sync_capture_chart() -> dict:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(_async_capture_chart_impl())
+        return loop.run_until_complete(_async_capture_chart_impl(target_url))
     finally:
         loop.close()
 
-async def capture_chart() -> dict:
+async def capture_chart(target_url: str = None) -> dict:
     """
     Main entry point for capturing a chart.
     Runs the capture in a separate thread using a ProactorEventLoop on Windows
@@ -35,11 +35,12 @@ async def capture_chart() -> dict:
     # might be a SelectorEventLoop. On other systems, we can run it directly.
     if sys.platform == "win32":
         logger.info("🔀 Running Playwright capture in a dedicated background thread with ProactorEventLoop...")
-        return await asyncio.to_thread(_sync_capture_chart)
+        return await asyncio.to_thread(_sync_capture_chart, target_url)
     else:
-        return await _async_capture_chart_impl()
+        return await _async_capture_chart_impl(target_url)
 
-async def _async_capture_chart_impl() -> dict:
+async def _async_capture_chart_impl(target_url: str = None) -> dict:
+
     """
     Launches headless Chromium to capture a clean screenshot of the stock index graph.
     Injects DOM operations to remove common overlays, ads, modals, headers, and sidebars.
@@ -71,9 +72,11 @@ async def _async_capture_chart_impl() -> dict:
             
             page = await context.new_page()
             
-            logger.info(f"🔗 Navigating to target stock URL: {config.TARGET_URL}")
+            url_to_capture = target_url if target_url else config.TARGET_URL
+            logger.info(f"🔗 Navigating to target stock URL: {url_to_capture}")
             # Dynamic navigation
-            await page.goto(config.TARGET_URL, wait_until="networkidle", timeout=35000)
+            await page.goto(url_to_capture, wait_until="networkidle", timeout=35000)
+
             
             # Allow time for initial rendering
             logger.info(f"⏱ Waiting {config.RENDER_DELAY_MS}ms for chart animation frames...")

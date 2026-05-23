@@ -1,4 +1,5 @@
 import sys
+sys.dont_write_bytecode = True
 import asyncio
 
 # Fix Windows event loop policy for Playwright subprocess compatibility

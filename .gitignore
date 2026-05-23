@@ -91,3 +91,14 @@ test-results/
 # Mac files
 .AppleDouble
 .LSOverride
+
+# Python compilation cache & environment files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+ENV/
+env/
