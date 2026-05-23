@@ -42,7 +42,8 @@ class StockPrediction(Base):
             "stock_symbol": self.stock_symbol,
             "captured_at": self.captured_at.isoformat() if self.captured_at else None,
             "image_path": self.image_path,
-            "image_url": f"/screenshots/{self.image_path}",
+            "image_url": self.image_path if (self.image_path and (self.image_path.startswith("http://") or self.image_path.startswith("https://"))) else f"/screenshots/{self.image_path}",
+
             "trend_direction": self.trend_direction,
             "confidence_score": self.confidence_score,
             "support_levels": self.support_levels,

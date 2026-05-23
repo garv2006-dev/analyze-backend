@@ -77,12 +77,21 @@ async def delete_prediction(id: int, db: AsyncSession = Depends(get_db)):
             
         # Clean up image from storage if it exists
         try:
-            image_file_path = config.SCREENSHOTS_DIR / row.image_path
-            if image_file_path.exists():
-                image_file_path.unlink()
-                logger.info(f"🗑️ Deleted associated screenshot file: {image_file_path}")
+            if row.image_path and (row.image_path.startswith("http://") or row.image_path.startswith("https://")):
+                # It's a Cloudinary image, delete it asynchronously in a background thread
+                from backend.app.services import cloudinary as cloudinary_service
+                logger.info(f"🗑️ Deleting associated Cloudinary screenshot: {row.image_path}")
+                import asyncio
+                await asyncio.to_thread(cloudinary_service.delete_image, row.image_path)
+            else:
+                # Local screenshot file
+                image_file_path = config.SCREENSHOTS_DIR / row.image_path
+                if image_file_path.exists():
+                    image_file_path.unlink()
+                    logger.info(f"🗑️ Deleted associated local screenshot file: {image_file_path}")
         except Exception as file_err:
             logger.warning(f"Could not delete image file {row.image_path}: {file_err}")
+
 
         # Delete database row
         await db.delete(row)

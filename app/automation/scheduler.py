@@ -28,11 +28,27 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
     # 2. Feed image to OpenAI Vision API (or dynamic offline simulation)
     ai_analysis = await ai.analyze_chart(capture_result["absolute_path"])
     
+    # 2.5. Upload image to Cloudinary if enabled
+    image_path_to_save = capture_result["filename"]
+    if config.IS_CLOUDINARY_ENABLED:
+        try:
+            logger.info("☁️ Cloudinary is enabled. Uploading screenshot...")
+            from backend.app.services import cloudinary as cloudinary_service
+            cloudinary_url = await asyncio.to_thread(
+                cloudinary_service.upload_image, 
+                capture_result["absolute_path"]
+            )
+            if cloudinary_url:
+                image_path_to_save = cloudinary_url
+        except Exception as upload_err:
+            logger.error(f"⚠️ Failed to upload screenshot to Cloudinary, using local fallback: {upload_err}")
+    
     # 3. Create the database record
     prediction = StockPrediction(
         stock_symbol=stock_symbol,
-        image_path=capture_result["filename"],
+        image_path=image_path_to_save,
         trend_direction=ai_analysis["trend_direction"],
+
         confidence_score=ai_analysis["confidence_score"],
         support_levels=ai_analysis["support_levels"],
         resistance_levels=ai_analysis["resistance_levels"],
