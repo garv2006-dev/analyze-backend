@@ -1,0 +1,13 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+playwright>=1.44.0
+openai>=1.30.0
+SQLAlchemy>=2.0.30
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+APScheduler>=3.10.4
+python-dotenv>=1.0.1
+pillow>=10.3.0
+aiofiles>=23.2.1
+psutil>=5.9.8
+aiosqlite>=0.20.0
