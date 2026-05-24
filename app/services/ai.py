@@ -15,7 +15,18 @@ last_mock_value = 23680.50
 # Initialize client if not in mock mode
 async_client = None
 if not config.IS_MOCK_MODE:
-    async_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+    default_headers = {}
+    if config.IS_OPENROUTER:
+        if config.OPENROUTER_REFERER:
+            default_headers["HTTP-Referer"] = config.OPENROUTER_REFERER
+        if config.OPENROUTER_TITLE:
+            default_headers["X-OpenRouter-Title"] = config.OPENROUTER_TITLE
+
+    async_client = AsyncOpenAI(
+        api_key=config.OPENAI_API_KEY,
+        base_url=config.OPENAI_BASE_URL,
+        default_headers=default_headers if default_headers else None
+    )
 
 def file_to_base64(file_path: str) -> str:
     """Reads a file and converts it into a base64 encoded string."""
@@ -44,22 +55,34 @@ async def analyze_chart(absolute_image_path: str) -> dict:
         data_url = f"data:image/png;base64,{base64_image}"
         
         prompt = """You are a highly experienced Senior Quantitative Chart Analyst, Day Trader, and Financial Engineer.
-Analyze the provided screenshot of the stock index/asset chart and extract structured intelligence.
+Analyze the provided screenshot of the stock index/asset chart with absolute technical accuracy to extract structured market intelligence and highly precise trend predictions.
+
+### Visual Audit Guidelines for Maximum Accuracy:
+1. **Precise Price Extraction**: Examine the right vertical axis (price axis) and any visible dynamic price tag to locate the EXACT current price of the asset. Never invent a price that is not physically visible or scale-accurate.
+2. **Candlestick and Momentum Audit**: Carefully analyze the last 5 to 10 candlesticks. Check if they are green (buying pressure) or red (selling pressure), their body-to-wick sizes, and if they represent hammers, engulfing patterns, wicks of rejection, or consecutive trend candles.
+3. **Dynamic Support and Resistance Discovery**: Identify clear horizontal price zones where the price has touched and bounced off at least twice in the past. These are your Key Support Levels. Identify overhead ceilings where the price has struggled to break out in recent peaks. These are your Key Resistance Levels.
+4. **Indicators Visual Integration**: Visually check for indicators (such as volume bars at the bottom, Moving Average lines crossing candles, RSI, or MACD lines). Incorporate their visual state (e.g., golden cross, oversold, bearish divergence) into your logical reasoning.
+5. **Chart Structure & Trend Analysis**: Identify the dominant trend (BULLISH if making higher highs and higher lows; BEARISH if making lower highs and lower lows; SIDEWAYS if oscillating inside a horizontal consolidation channel).
+6. **Mathematical Trade Setup Calculation**:
+   - Calculate a logical **entry_price** based on breakouts or pullbacks.
+   - Set a protective **stop_loss** level (below support for bullish trades, above resistance for bearish trades).
+   - Set a realistic **target_price** (take-profit near resistance for bullish trades, near support for bearish trades).
+7. **No Placeholder Bias**: Do NOT repeat the example values below. Perform actual visual measurements on the unique chart provided!
 
 Your output must be a clean, valid JSON object following EXACTLY this schema structure:
 {
   "trend_direction": "BULLISH", // Must be exactly one of: "BULLISH", "BEARISH", "SIDEWAYS"
   "market_sentiment": "POSITIVE", // Must be exactly one of: "POSITIVE", "NEGATIVE", "NEUTRAL"
-  "confidence_score": 92, // Percentage confidence from 0 to 100
-  "current_value": 23680.50, // Estimate the current asset price shown in the chart
+  "confidence_score": 92, // Percentage confidence from 0 to 100 based on pattern clarity
+  "current_value": 23680.50, // Estimate the exact current asset price shown in the chart
   "support_levels": [
     23650.00,
     23620.00
-  ], // Array of 1 to 3 key support levels found on the chart
+  ], // Array of 1 to 3 key support levels found on the chart, sorted highest to lowest
   "resistance_levels": [
     23780.00,
     23820.00
-  ], // Array of 1 to 3 key resistance levels found on the chart
+  ], // Array of 1 to 3 key resistance levels found on the chart, sorted lowest to highest
   "predictions": {
     "15_minutes": {
       "direction": "UP", // Must be exactly: "UP", "DOWN", "SIDEWAYS"
@@ -79,8 +102,18 @@ Your output must be a clean, valid JSON object following EXACTLY this schema str
     }
   },
   "indicators": {
-    "rsi": 64, // Estimate current RSI value between 0 and 100
+    "rsi": 64, // Estimate current RSI value between 0 and 100 based on price velocity or visible indicators
     "macd_trend": "Bullish Crossover" // e.g. "Bullish Crossover", "Bearish Divergence", "Neutral", "Consolidation"
+  },
+  "technical_analysis": {
+    "price_action_observations": "Provide a detailed description of the recent candlestick patterns, wick rejections, and overall price direction structure.",
+    "support_resistance_rationale": "Explain precisely why the listed support and resistance levels are structurally significant based on the chart's historical peaks/troughs.",
+    "indicators_rationale": "Describe the status of the volume, moving averages, or other indicators observed or inferred from the visual price momentum."
+  },
+  "trade_setup": {
+    "entry_price": 23750.00, // Best estimated entry price based on breakout or pullback zones
+    "stop_loss": 23710.00, // A strict protection stop-loss level
+    "target_price": 23820.00 // A logical take-profit target near next resistance
   },
   "signal": "BUY", // Must be exactly one of: "BUY", "SELL", "HOLD"
   "summary": "Strong bullish continuation detected with breakout potential above resistance." // Professional concise summary
@@ -90,7 +123,7 @@ Return ONLY the raw JSON object. Do NOT wrap your output in markdown formatting 
 Ensure it is a valid, parseable JSON block."""
 
         response = await async_client.chat.completions.create(
-            model="gpt-4o",
+            model=config.AI_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -142,7 +175,9 @@ Ensure it is a valid, parseable JSON block."""
                     "rsi": 50,
                     "macd_trend": "Neutral"
                 }),
-                "signal": parsed_data.get("signal", "HOLD")
+                "signal": parsed_data.get("signal", "HOLD"),
+                "technical_analysis": parsed_data.get("technical_analysis", {}),
+                "trade_setup": parsed_data.get("trade_setup", {})
             }
         }
         
@@ -237,6 +272,16 @@ def simulate_vision_analysis() -> dict:
                 "rsi": rsi,
                 "macd_trend": macd
             },
-            "signal": signal
+            "signal": signal,
+            "technical_analysis": {
+                "price_action_observations": "Sideways candle bodies with low volume indicating consolidation.",
+                "support_resistance_rationale": f"Bounces observed at support floor ${s1} and capped at resistance ceiling ${r1}.",
+                "indicators_rationale": f"RSI is neutral at {rsi} showing balanced market momentum."
+            },
+            "trade_setup": {
+                "entry_price": round(last_mock_value, 2),
+                "stop_loss": s1 if trend == "BULLISH" else round(last_mock_value * 1.015, 2),
+                "target_price": r1 if trend == "BULLISH" else round(last_mock_value * 0.985, 2)
+            }
         }
     }

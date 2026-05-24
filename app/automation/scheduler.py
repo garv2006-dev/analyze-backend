@@ -1,5 +1,7 @@
 import logging
 import asyncio
+import json
+from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app import config
@@ -12,6 +14,37 @@ logger = logging.getLogger("Scheduler")
 logger.setLevel(logging.INFO)
 
 scheduler = AsyncIOScheduler()
+SETTINGS_FILE = Path(__file__).resolve().parent.parent / "scheduler_settings.json"
+
+def get_saved_interval() -> int:
+    """Helper to load persistent interval configuration from disk or default to 5 minutes."""
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                data = json.load(f)
+                return int(data.get("interval_minutes", 5))
+        except Exception as e:
+            logger.warning(f"Could not load saved interval settings: {e}")
+    return 5
+
+def save_interval(minutes: int):
+    """Helper to persist interval configuration to disk."""
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"interval_minutes": minutes}, f)
+    except Exception as e:
+        logger.error(f"Failed to persist scheduler settings: {e}")
+
+def update_scheduler_interval(minutes: int) -> bool:
+    """Reschedules the active background chart analysis job dynamically and persists settings."""
+    save_interval(minutes)
+    try:
+        scheduler.reschedule_job('chart_pipeline_job', trigger='interval', minutes=minutes)
+        logger.info(f"✔️ Scheduler successfully rescheduled to run every {minutes} minutes.")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to reschedule job dynamically: {e}")
+        return False
 
 async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIFTY50", target_url: str = None) -> StockPrediction:
     """
@@ -26,64 +59,64 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
     capture_result = await browser.capture_chart(target_url=target_url)
 
     
-    # 2. Feed image to OpenAI Vision API (or dynamic offline simulation)
-    ai_analysis = await ai.analyze_chart(capture_result["absolute_path"])
-    
-    # 2.5. Upload image to Cloudinary if enabled
-    image_path_to_save = capture_result["filename"]
-    if config.IS_CLOUDINARY_ENABLED:
-        try:
-            logger.info("☁️ Cloudinary is enabled. Uploading screenshot...")
-            from backend.app.services import cloudinary as cloudinary_service
-            cloudinary_url = await asyncio.to_thread(
-                cloudinary_service.upload_image, 
-                capture_result["absolute_path"]
-            )
-            if cloudinary_url:
-                image_path_to_save = cloudinary_url
-        except Exception as upload_err:
-            logger.error(f"⚠️ Failed to upload screenshot to Cloudinary, using local fallback: {upload_err}")
-    
-    # 3. Create the database record
-    prediction = StockPrediction(
-        stock_symbol=stock_symbol,
-        image_path=image_path_to_save,
-        trend_direction=ai_analysis["trend_direction"],
-
-        confidence_score=ai_analysis["confidence_score"],
-        support_levels=ai_analysis["support_levels"],
-        resistance_levels=ai_analysis["resistance_levels"],
-        prediction_json=ai_analysis["prediction_json"],
-        ai_summary=ai_analysis["ai_summary"]
-    )
-    
-    session.add(prediction)
-    # Save transaction
-    await session.flush()
-    await session.refresh(prediction)
-    
-    logger.info(f"💾 Prediction persisted successfully with ID #{prediction.id}")
-    
-    # Clean up local screenshot immediately if it was successfully uploaded to Cloudinary
-    if image_path_to_save.startswith("http"):
+    try:
+        # 2. Feed image to OpenAI Vision API (or dynamic offline simulation)
+        ai_analysis = await ai.analyze_chart(capture_result["absolute_path"])
+        
+        # 2.5. Upload image to Cloudinary if enabled
+        image_path_to_save = capture_result["filename"]
+        if config.IS_CLOUDINARY_ENABLED:
+            try:
+                logger.info("☁️ Cloudinary is enabled. Uploading screenshot...")
+                from backend.app.services import cloudinary as cloudinary_service
+                cloudinary_url = await asyncio.to_thread(
+                    cloudinary_service.upload_image, 
+                    capture_result["absolute_path"]
+                )
+                if cloudinary_url:
+                    image_path_to_save = cloudinary_url
+            except Exception as upload_err:
+                logger.error(f"⚠️ Failed to upload screenshot to Cloudinary, using local fallback: {upload_err}")
+        
+        # 3. Create the database record
+        prediction = StockPrediction(
+            stock_symbol=stock_symbol,
+            image_path=image_path_to_save,
+            trend_direction=ai_analysis["trend_direction"],
+            confidence_score=ai_analysis["confidence_score"],
+            support_levels=ai_analysis["support_levels"],
+            resistance_levels=ai_analysis["resistance_levels"],
+            prediction_json=ai_analysis["prediction_json"],
+            ai_summary=ai_analysis["ai_summary"]
+        )
+        
+        session.add(prediction)
+        # Save transaction
+        await session.flush()
+        await session.refresh(prediction)
+        
+        logger.info(f"💾 Prediction persisted successfully with ID #{prediction.id}")
+        
+        # 4. Broadcast the newly created prediction over all active WebSockets
+        prediction_dict = prediction.to_dict()
+        await ws_manager.broadcast({
+            "success": True,
+            "type": "NEW_PREDICTION",
+            "data": prediction_dict
+        })
+        
+        return prediction
+        
+    finally:
+        # Always clean up the temporary local screenshot to avoid storing images in the codebase folder
         try:
             from pathlib import Path
             local_file = Path(capture_result["absolute_path"])
             if local_file.exists():
                 local_file.unlink()
-                logger.info(f"🗑️ Deleted local temporary screenshot after successful Cloudinary upload: {local_file.name}")
+                logger.info(f"🗑️ Cleaned up temporary local screenshot file: {local_file.name}")
         except Exception as cleanup_err:
             logger.warning(f"⚠️ Failed to delete temporary local screenshot: {cleanup_err}")
-            
-    # 4. Broadcast the newly created prediction over all active WebSockets
-    prediction_dict = prediction.to_dict()
-    await ws_manager.broadcast({
-        "success": True,
-        "type": "NEW_PREDICTION",
-        "data": prediction_dict
-    })
-    
-    return prediction
 
 async def run_pipeline_cycle():
     """Triggered by the APScheduler background daemon."""
@@ -99,11 +132,12 @@ async def run_pipeline_cycle():
             logger.error(f"❌ [CRON ENGINE] Background analysis sequence failed: {error}")
 
 def start_scheduler():
-    """Starts the cron automation background engine."""
-    logger.info("⏰ Initializing APScheduler Background Engine (Interval: 5 minutes)...")
+    """Starts the cron automation background engine using a dynamic, user-configured interval."""
+    interval = get_saved_interval()
+    logger.info(f"⏰ Initializing APScheduler Background Engine (Interval: {interval} minutes)...")
     
-    # Setup cron every 5 minutes (equivalent to node-cron '*/5 * * * *')
-    scheduler.add_job(run_pipeline_cycle, 'cron', minute='*/5', id='chart_pipeline_job')
+    # Setup interval trigger
+    scheduler.add_job(run_pipeline_cycle, 'interval', minutes=interval, id='chart_pipeline_job')
     scheduler.start()
     
     # Schedule a one-time bootstrap cycle after 5 seconds to guarantee immediate data for the frontend

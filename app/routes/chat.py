@@ -177,7 +177,7 @@ Guidelines:
                 openai_messages.append({"role": msg.role, "content": msg.content})
 
             response = await async_client.chat.completions.create(
-                model="gpt-4o",
+                model=config.AI_MODEL,
                 messages=openai_messages,
                 max_tokens=600,
                 temperature=0.7

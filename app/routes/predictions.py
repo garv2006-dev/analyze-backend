@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from backend.app.database import get_db
 from backend.app.models.prediction import StockPrediction
-from backend.app.automation.scheduler import execute_analysis_cycle
+from backend.app.automation.scheduler import execute_analysis_cycle, get_saved_interval, update_scheduler_interval
 
 logger = logging.getLogger("Routes")
 logger.setLevel(logging.INFO)
@@ -199,4 +199,55 @@ async def trigger_manual_analysis(request_data: Optional[TriggerRequest] = None,
         raise HTTPException(
             status_code=500,
             detail=f"On-demand browser capture/AI analysis cycle failed: {error}"
+        )
+
+class SchedulerSettingsRequest(BaseModel):
+    interval_minutes: int
+
+@router.get("/scheduler-settings")
+async def get_scheduler_settings():
+    """Gets the current background scheduler interval (in minutes)"""
+    logger.info("📥 GET /api/predictions/scheduler-settings request received.")
+    try:
+        interval = get_saved_interval()
+        return {
+            "success": True,
+            "interval_minutes": interval
+        }
+    except Exception as e:
+        logger.error(f"Failed to get scheduler settings: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve background scheduler settings."
+        )
+
+@router.post("/scheduler-settings")
+async def update_scheduler_settings(settings: SchedulerSettingsRequest):
+    """Updates the background scheduler interval in minutes and reschedules the job dynamically"""
+    logger.info(f"📥 POST /api/predictions/scheduler-settings request received with interval: {settings.interval_minutes}")
+    if settings.interval_minutes < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Interval must be at least 1 minute."
+        )
+    try:
+        success = update_scheduler_interval(settings.interval_minutes)
+        if success:
+            return {
+                "success": True,
+                "message": f"Background scheduler interval successfully updated to {settings.interval_minutes} minutes.",
+                "interval_minutes": settings.interval_minutes
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to reschedule the background cron job."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update scheduler settings: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while updating the background scheduler: {str(e)}"
         )

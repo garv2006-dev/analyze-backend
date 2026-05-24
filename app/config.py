@@ -39,6 +39,23 @@ IS_MOCK_MODE = (
     or OPENAI_API_KEY.startswith("sk-or-****")
 )
 
+# Detect if using OpenRouter key format
+IS_OPENROUTER = OPENAI_API_KEY.startswith("sk-or-")
+
+# Configure AI model and endpoint base URL dynamically
+if IS_OPENROUTER:
+    AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-4o")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    # OpenRouter specific headers
+    OPENROUTER_REFERER = os.getenv("OPENROUTER_REFERER", "http://localhost:3000")
+    OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", "AI Graph Analyzer")
+else:
+    AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    OPENROUTER_REFERER = None
+    OPENROUTER_TITLE = None
+
+
 # Browser Automation Settings
 TARGET_URL = os.getenv("TARGET_URL", "https://groww.in/charts/indices/nifty")
 TARGET_SELECTOR = os.getenv("TARGET_SELECTOR", "body")
