@@ -30,6 +30,11 @@ SYNC_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{
 
 # AI Vision Credentials
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# If GEMINI_API_KEY is provided, prioritize it
+if GEMINI_API_KEY:
+    OPENAI_API_KEY = GEMINI_API_KEY
 
 # Check if OpenAI is running in offline simulation mode
 IS_MOCK_MODE = (
@@ -37,13 +42,20 @@ IS_MOCK_MODE = (
     or OPENAI_API_KEY == "mock-api-key-for-local-runs"
     or OPENAI_API_KEY.startswith("sk-proj-****")
     or OPENAI_API_KEY.startswith("sk-or-****")
+    or OPENAI_API_KEY.startswith("AIzaSy****")
 )
 
-# Detect if using OpenRouter key format
+# Detect key types
 IS_OPENROUTER = OPENAI_API_KEY.startswith("sk-or-")
+IS_GEMINI = OPENAI_API_KEY.startswith("AIzaSy")
 
 # Configure AI model and endpoint base URL dynamically
-if IS_OPENROUTER:
+if IS_GEMINI:
+    AI_MODEL = os.getenv("AI_MODEL", "gemini-1.5-flash")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    OPENROUTER_REFERER = None
+    OPENROUTER_TITLE = None
+elif IS_OPENROUTER:
     AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-4o")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
     # OpenRouter specific headers

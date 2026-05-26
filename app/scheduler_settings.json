@@ -1,0 +1,1 @@
+{"interval_minutes": 5, "only_during_market_hours": true, "market_start_time": "09:15", "market_end_time": "15:30", "exclude_weekends": true}

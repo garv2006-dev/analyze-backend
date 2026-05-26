@@ -77,6 +77,75 @@ async def get_predictions(
             detail="Severe database disruption occurred while retrieving prediction logs."
         )
 
+
+class SchedulerSettingsRequest(BaseModel):
+    interval_minutes: int
+    only_during_market_hours: Optional[bool] = None
+    market_start_time: Optional[str] = None
+    market_end_time: Optional[str] = None
+    exclude_weekends: Optional[bool] = None
+
+@router.get("/scheduler-settings")
+async def get_scheduler_settings():
+    """Gets the current background scheduler settings dictionary."""
+    logger.info("📥 GET /api/predictions/scheduler-settings request received.")
+    try:
+        from backend.app.automation.scheduler import get_saved_settings
+        settings = get_saved_settings()
+        return {
+            "success": True,
+            **settings
+        }
+    except Exception as e:
+        logger.error(f"Failed to get scheduler settings: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve background scheduler settings."
+        )
+
+@router.post("/scheduler-settings")
+async def update_scheduler_settings(settings: SchedulerSettingsRequest):
+    """Updates the background scheduler settings dynamically"""
+    logger.info(f"📥 POST /api/predictions/scheduler-settings request received.")
+    if settings.interval_minutes < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Interval must be at least 1 minute."
+        )
+    try:
+        from backend.app.automation.scheduler import update_scheduler_settings_dict
+        
+        payload = {"interval_minutes": settings.interval_minutes}
+        if settings.only_during_market_hours is not None:
+            payload["only_during_market_hours"] = settings.only_during_market_hours
+        if settings.market_start_time is not None:
+            payload["market_start_time"] = settings.market_start_time
+        if settings.market_end_time is not None:
+            payload["market_end_time"] = settings.market_end_time
+        if settings.exclude_weekends is not None:
+            payload["exclude_weekends"] = settings.exclude_weekends
+            
+        success = update_scheduler_settings_dict(payload)
+        if success:
+            return {
+                "success": True,
+                "message": "Background scheduler settings successfully updated.",
+                **payload
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to reschedule the background cron job."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update scheduler settings: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while updating the background scheduler: {str(e)}"
+        )
+
 @router.delete("/{id}")
 async def delete_prediction(id: int, db: AsyncSession = Depends(get_db)):
     """Deletes a single prediction record by ID, including its associated screenshots file."""
@@ -199,55 +268,4 @@ async def trigger_manual_analysis(request_data: Optional[TriggerRequest] = None,
         raise HTTPException(
             status_code=500,
             detail=f"On-demand browser capture/AI analysis cycle failed: {error}"
-        )
-
-class SchedulerSettingsRequest(BaseModel):
-    interval_minutes: int
-
-@router.get("/scheduler-settings")
-async def get_scheduler_settings():
-    """Gets the current background scheduler interval (in minutes)"""
-    logger.info("📥 GET /api/predictions/scheduler-settings request received.")
-    try:
-        interval = get_saved_interval()
-        return {
-            "success": True,
-            "interval_minutes": interval
-        }
-    except Exception as e:
-        logger.error(f"Failed to get scheduler settings: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve background scheduler settings."
-        )
-
-@router.post("/scheduler-settings")
-async def update_scheduler_settings(settings: SchedulerSettingsRequest):
-    """Updates the background scheduler interval in minutes and reschedules the job dynamically"""
-    logger.info(f"📥 POST /api/predictions/scheduler-settings request received with interval: {settings.interval_minutes}")
-    if settings.interval_minutes < 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Interval must be at least 1 minute."
-        )
-    try:
-        success = update_scheduler_interval(settings.interval_minutes)
-        if success:
-            return {
-                "success": True,
-                "message": f"Background scheduler interval successfully updated to {settings.interval_minutes} minutes.",
-                "interval_minutes": settings.interval_minutes
-            }
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to reschedule the background cron job."
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update scheduler settings: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while updating the background scheduler: {str(e)}"
         )

@@ -8,7 +8,7 @@ from backend.app import config
 logger = logging.getLogger("Browser")
 logger.setLevel(logging.INFO)
 
-def _sync_capture_chart(target_url: str = None) -> dict:
+def _sync_capture_chart(target_url: str = None, stock_symbol: str = None) -> dict:
     """Synchronous worker that executes the async playwright capture inside a ProactorEventLoop."""
     import sys
     
@@ -19,11 +19,11 @@ def _sync_capture_chart(target_url: str = None) -> dict:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(_async_capture_chart_impl(target_url))
+        return loop.run_until_complete(_async_capture_chart_impl(target_url, stock_symbol))
     finally:
         loop.close()
 
-async def capture_chart(target_url: str = None) -> dict:
+async def capture_chart(target_url: str = None, stock_symbol: str = None) -> dict:
     """
     Main entry point for capturing a chart.
     Runs the capture in a separate thread using a ProactorEventLoop on Windows
@@ -35,11 +35,11 @@ async def capture_chart(target_url: str = None) -> dict:
     # might be a SelectorEventLoop. On other systems, we can run it directly.
     if sys.platform == "win32":
         logger.info("🔀 Running Playwright capture in a dedicated background thread with ProactorEventLoop...")
-        return await asyncio.to_thread(_sync_capture_chart, target_url)
+        return await asyncio.to_thread(_sync_capture_chart, target_url, stock_symbol)
     else:
-        return await _async_capture_chart_impl(target_url)
+        return await _async_capture_chart_impl(target_url, stock_symbol)
 
-async def _async_capture_chart_impl(target_url: str = None) -> dict:
+async def _async_capture_chart_impl(target_url: str = None, stock_symbol: str = None) -> dict:
 
     """
     Launches headless Chromium to capture a clean screenshot of the stock index graph.
@@ -131,6 +131,77 @@ async def _async_capture_chart_impl(target_url: str = None) -> dict:
             
             # Post DOM cleanup render buffer
             await page.wait_for_timeout(1000)
+            
+            # Dynamic price extraction from DOM using robust logic
+            logger.info("🔍 Extracting real-time stock/index price from page DOM...")
+            extracted_price = None
+            try:
+                # Use default fallback symbol if not provided
+                search_symbol = stock_symbol if stock_symbol else "NIFTY"
+                # Strip numeric details from symbol, e.g., NIFTY50 -> NIFTY
+                clean_symbol = "".join([c for c in search_symbol if not c.isdigit()]).upper().strip()
+                
+                extracted_price = await page.evaluate(f"""
+                    (symbol) => {{
+                        const parseVal = (str) => {{
+                            if (!str) return null;
+                            const clean = str.replace(/[₹$,\\s?]/g, '').trim();
+                            const num = parseFloat(clean);
+                            return isNaN(num) ? null : num;
+                        }};
+
+                        const bodyText = document.body.innerText || "";
+                        const lines = bodyText.split('\\n').map(l => l.trim()).filter(Boolean);
+
+                        // 1. Try finding Rupee symbol (? or \\u20b9) followed by a decimal number (for stocks like JIO, HDFC)
+                        const rupeeRegex = /[\\u20b9\\?]\\s*([0-9,]+\\.[0-9]{{2}})/g;
+                        let match;
+                        const rupeeMatches = [];
+                        while ((match = rupeeRegex.exec(bodyText)) !== null) {{
+                            const val = parseVal(match[1]);
+                            if (val && val > 5) {{
+                                rupeeMatches.push(val);
+                            }}
+                        }}
+                        if (rupeeMatches.length > 0) {{
+                            return rupeeMatches[0];
+                        }}
+
+                        // 2. Search for lines containing the symbol and extract the next line's value
+                        for (let i = 0; i < lines.length - 1; i++) {{
+                            const line = lines[i].toUpperCase();
+                            if (line.includes(symbol) || symbol.includes(line)) {{
+                                for (let j = 1; j <= 3; j++) {{
+                                    if (i + j < lines.length) {{
+                                        const nextLine = lines[i + j];
+                                        const numMatch = nextLine.match(/^[0-9,]+\\.[0-9]{{2}}$/) || nextLine.match(/[0-9,]+\\.[0-9]{{2}}/);
+                                        if (numMatch) {{
+                                            const val = parseVal(numMatch[0]);
+                                            if (val && val > 5) {{
+                                                return val;
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                            }}
+                        }}
+
+                        // 3. Fallback: search for any number-like line that looks like a stock/index price
+                        for (const line of lines) {{
+                            if (/^[0-9,]+\\.[0-9]{{2}}$/.test(line)) {{
+                                const val = parseVal(line);
+                                if (val && val > 5) {{
+                                    return val;
+                                }}
+                            }}
+                        }}
+
+                        return null;
+                    }}
+                """, clean_symbol)
+                logger.info(f"✔️ Real-time price successfully extracted from DOM: ₹{extracted_price}")
+            except Exception as extract_err:
+                logger.warning(f"⚠️ Failed to extract live price from page DOM: {extract_err}")
             
             timestamp = int(time.time() * 1000)
             filename = f"graph_{timestamp}.png"
@@ -275,7 +346,8 @@ async def _async_capture_chart_impl(target_url: str = None) -> dict:
             
             return {
                 "filename": filename,
-                "absolute_path": str(absolute_path)
+                "absolute_path": str(absolute_path),
+                "extracted_price": extracted_price
             }
             
         except Exception as err:

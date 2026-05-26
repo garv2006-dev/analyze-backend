@@ -4,7 +4,16 @@ import logging
 import random
 from pathlib import Path
 from openai import AsyncOpenAI
+from PIL import Image
 from backend.app import config
+
+# Optional import of Google GenAI SDK
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 logger = logging.getLogger("AI")
 logger.setLevel(logging.INFO)
@@ -14,47 +23,55 @@ last_mock_value = 23680.50
 
 # Initialize client if not in mock mode
 async_client = None
-if not config.IS_MOCK_MODE:
-    default_headers = {}
-    if config.IS_OPENROUTER:
-        if config.OPENROUTER_REFERER:
-            default_headers["HTTP-Referer"] = config.OPENROUTER_REFERER
-        if config.OPENROUTER_TITLE:
-            default_headers["X-OpenRouter-Title"] = config.OPENROUTER_TITLE
+gemini_client = None
 
-    async_client = AsyncOpenAI(
-        api_key=config.OPENAI_API_KEY,
-        base_url=config.OPENAI_BASE_URL,
-        default_headers=default_headers if default_headers else None
-    )
+if not config.IS_MOCK_MODE:
+    if config.IS_GEMINI:
+        if genai:
+            logger.info("🔌 Initializing official Google GenAI SDK client...")
+            gemini_client = genai.Client(api_key=config.OPENAI_API_KEY)
+        else:
+            logger.warning("⚠️ google-genai SDK is not installed! Falling back to standard OpenAI SDK for Gemini...")
+            async_client = AsyncOpenAI(
+                api_key=config.OPENAI_API_KEY,
+                base_url=config.OPENAI_BASE_URL
+            )
+    else:
+        default_headers = {}
+        if config.IS_OPENROUTER:
+            if config.OPENROUTER_REFERER:
+                default_headers["HTTP-Referer"] = config.OPENROUTER_REFERER
+            if config.OPENROUTER_TITLE:
+                default_headers["X-OpenRouter-Title"] = config.OPENROUTER_TITLE
+
+        async_client = AsyncOpenAI(
+            api_key=config.OPENAI_API_KEY,
+            base_url=config.OPENAI_BASE_URL,
+            default_headers=default_headers if default_headers else None
+        )
 
 def file_to_base64(file_path: str) -> str:
     """Reads a file and converts it into a base64 encoded string."""
     with open(file_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
-async def analyze_chart(absolute_image_path: str) -> dict:
+async def analyze_chart(absolute_image_path: str, extracted_price: float = None) -> dict:
     """
     Sends the graph screenshot to OpenAI Vision API for deep market analysis.
     Falls back to synthetic mock data generator if API key is invalid/missing.
     
     Args:
         absolute_image_path (str): The absolute filesystem path of the PNG image.
+        extracted_price (float): Dynamic real-time price extracted from page DOM.
         
     Returns:
         dict: Containing trend_direction, confidence_score, support_levels, resistance_levels, prediction_json, ai_summary
     """
     if config.IS_MOCK_MODE:
         logger.info(f"🧠 [MOCK MODE] Simulating stock vision analysis for: {absolute_image_path}")
-        return simulate_vision_analysis()
+        return simulate_vision_analysis(extracted_price=extracted_price)
         
-    logger.info("🧠 Initializing active OpenAI Vision reasoning pipeline (model: gpt-4o)...")
-    
-    try:
-        base64_image = file_to_base64(absolute_image_path)
-        data_url = f"data:image/png;base64,{base64_image}"
-        
-        prompt = """You are a highly experienced Senior Quantitative Chart Analyst, Day Trader, and Financial Engineer.
+    prompt = """You are a highly experienced Senior Quantitative Chart Analyst, Day Trader, and Financial Engineer.
 Analyze the provided screenshot of the stock index/asset chart with absolute technical accuracy to extract structured market intelligence and highly precise trend predictions.
 
 ### Visual Audit Guidelines for Maximum Accuracy:
@@ -122,27 +139,47 @@ Your output must be a clean, valid JSON object following EXACTLY this schema str
 Return ONLY the raw JSON object. Do NOT wrap your output in markdown formatting like ```json.
 Ensure it is a valid, parseable JSON block."""
 
-        response = await async_client.chat.completions.create(
-            model=config.AI_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": data_url
+    raw_content = ""
+    
+    try:
+        if config.IS_GEMINI and gemini_client:
+            logger.info(f"🧠 Initializing active Google GenAI (Gemini) pipeline (model: {config.AI_MODEL})...")
+            image = Image.open(absolute_image_path)
+            response = await gemini_client.aio.models.generate_content(
+                model=config.AI_MODEL,
+                contents=[image, prompt],
+                config=types.GenerateContentConfig(
+                    max_output_tokens=1000,
+                    temperature=0.4
+                )
+            )
+            raw_content = response.text.strip()
+            logger.info("✔️ Gemini response payload received. Parsing JSON content...")
+        else:
+            logger.info(f"🧠 Initializing active OpenAI Vision reasoning pipeline (model: {config.AI_MODEL})...")
+            base64_image = file_to_base64(absolute_image_path)
+            data_url = f"data:image/png;base64,{base64_image}"
+            
+            response = await async_client.chat.completions.create(
+                model=config.AI_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": data_url
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=1000
-        )
-        
-        raw_content = response.choices[0].message.content.strip()
-        logger.info("✔️ OpenAI response payload received. Parsing JSON content...")
+                        ]
+                    }
+                ],
+                max_tokens=1000
+            )
+            raw_content = response.choices[0].message.content.strip()
+            logger.info("✔️ OpenAI response payload received. Parsing JSON content...")
         
         # Strip markdown syntax wrappers if AI returned them
         clean_json = raw_content
@@ -160,6 +197,11 @@ Ensure it is a valid, parseable JSON block."""
             if key not in parsed_data:
                 raise ValueError(f"Missing required response field: '{key}'")
                 
+        # Guide current value and support/resistance if extracted_price is provided
+        current_value = parsed_data.get("current_value", sum(parsed_data["support_levels"])/len(parsed_data["support_levels"]) * 1.01)
+        if extracted_price is not None:
+            current_value = extracted_price
+            
         # Re-map parsed structure into table-friendly layout
         return {
             "trend_direction": parsed_data["trend_direction"].upper(),
@@ -168,7 +210,7 @@ Ensure it is a valid, parseable JSON block."""
             "resistance_levels": parsed_data["resistance_levels"],
             "ai_summary": parsed_data["summary"],
             "prediction_json": {
-                "current_value": parsed_data.get("current_value", sum(parsed_data["support_levels"])/len(parsed_data["support_levels"]) * 1.01),
+                "current_value": current_value,
                 "market_sentiment": parsed_data.get("market_sentiment", "NEUTRAL"),
                 "predictions": parsed_data.get("predictions", {}),
                 "indicators": parsed_data.get("indicators", {
@@ -184,16 +226,21 @@ Ensure it is a valid, parseable JSON block."""
     except Exception as err:
         logger.error(f"❌ OpenAI Vision analysis failed: {err}")
         logger.warning("⚠️ Falling back to synthetic market simulator due to pipeline disruption.")
-        return simulate_vision_analysis()
+        return simulate_vision_analysis(extracted_price=extracted_price)
 
-def simulate_vision_analysis() -> dict:
+def simulate_vision_analysis(extracted_price: float = None) -> dict:
     """Generates highly realistic dynamic synthetic mock data representing a real stock index."""
     global last_mock_value
     
-    # Random walk: step price by -1.5% to +2.0% (slight upward bias)
-    pct_change = (random.random() - 0.42) * 0.04
-    new_value = last_mock_value * (1 + pct_change)
-    last_mock_value = round(new_value, 2)
+    # Anchor the simulation directly to the extracted live price if available
+    if extracted_price is not None:
+        last_mock_value = float(extracted_price)
+        pct_change = (random.random() - 0.42) * 0.04
+    else:
+        # Random walk: step price by -1.5% to +2.0% (slight upward bias)
+        pct_change = (random.random() - 0.42) * 0.04
+        new_value = last_mock_value * (1 + pct_change)
+        last_mock_value = round(new_value, 2)
     
     # Calculate support/resistance levels based on price points
     s1 = round(last_mock_value * 0.985, 2)

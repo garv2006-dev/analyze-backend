@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from backend.app.database import get_db
 from backend.app.models.prediction import StockPrediction
-from backend.app.services.ai import async_client
+from backend.app.services.ai import async_client, gemini_client, types
 from backend.app import config
 
 logger = logging.getLogger("Chat")
@@ -161,7 +161,7 @@ Guidelines:
 5. If the user asks completely non-financial questions, politely guide them back to stock chart analysis."""
 
         # 2. Check for Mock Mode or missing API keys
-        if config.IS_MOCK_MODE or not async_client:
+        if config.IS_MOCK_MODE or (not async_client and not gemini_client):
             logger.info("🧠 [MOCK MODE] Generating synthetic financial chat response...")
             reply = generate_synthetic_reply(request.messages, prediction, symbol, support_str, resistance_str)
             return {
@@ -169,29 +169,52 @@ Guidelines:
                 "reply": reply
             }
 
-        # 3. Call OpenAI AsyncOpenAI API
+        # 3. Call AI API (Gemini Native or OpenAI/OpenRouter)
         try:
-            logger.info("🧠 Dispatching chat query to OpenAI reasoning pipeline...")
-            openai_messages = [{"role": "system", "content": system_prompt}]
-            for msg in request.messages:
-                openai_messages.append({"role": msg.role, "content": msg.content})
+            if config.IS_GEMINI and gemini_client and types:
+                logger.info("🧠 Dispatching chat query to Google GenAI (Gemini) native client...")
+                contents = []
+                for msg in request.messages:
+                    # Gemini expects 'user' or 'model' roles
+                    role = "user" if msg.role == "user" else "model"
+                    contents.append(types.Content(
+                        role=role,
+                        parts=[types.Part.from_text(text=msg.content)]
+                    ))
+                
+                response = await gemini_client.aio.models.generate_content(
+                    model=config.AI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        max_output_tokens=600,
+                        temperature=0.7
+                    )
+                )
+                reply = response.text.strip()
+                logger.info("✔️ Gemini chat response successfully compiled.")
+            else:
+                logger.info("🧠 Dispatching chat query to OpenAI reasoning pipeline...")
+                openai_messages = [{"role": "system", "content": system_prompt}]
+                for msg in request.messages:
+                    openai_messages.append({"role": msg.role, "content": msg.content})
 
-            response = await async_client.chat.completions.create(
-                model=config.AI_MODEL,
-                messages=openai_messages,
-                max_tokens=600,
-                temperature=0.7
-            )
-            
-            reply = response.choices[0].message.content.strip()
-            logger.info("✔️ OpenAI chat response successfully compiled.")
+                response = await async_client.chat.completions.create(
+                    model=config.AI_MODEL,
+                    messages=openai_messages,
+                    max_tokens=600,
+                    temperature=0.7
+                )
+                
+                reply = response.choices[0].message.content.strip()
+                logger.info("✔️ OpenAI chat response successfully compiled.")
             
             return {
                 "success": True,
                 "reply": reply
             }
         except Exception as api_err:
-            logger.warning(f"⚠️ OpenAI completions failed: {api_err}. Falling back to high-fidelity synthetic chat simulator.")
+            logger.warning(f"⚠️ AI completions failed: {api_err}. Falling back to high-fidelity synthetic chat simulator.")
             reply = generate_synthetic_reply(request.messages, prediction, symbol, support_str, resistance_str)
             return {
                 "success": True,
