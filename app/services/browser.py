@@ -74,8 +74,13 @@ async def _async_capture_chart_impl(target_url: str = None, stock_symbol: str = 
             
             url_to_capture = target_url if target_url else config.TARGET_URL
             logger.info(f"🔗 Navigating to target stock URL: {url_to_capture}")
-            # Dynamic navigation
-            await page.goto(url_to_capture, wait_until="networkidle", timeout=35000)
+            # Dynamic navigation - wait for standard load rather than networkidle to avoid being blocked by persistent sockets/trackers
+            try:
+                await page.goto(url_to_capture, wait_until="load", timeout=30000)
+                logger.info("✔️ Page load completed successfully.")
+            except Exception as goto_err:
+                logger.warning(f"⚠️ page.goto timed out or failed during load state: {goto_err}. Attempting to proceed with DOM extraction & screenshot capture...")
+
 
             
             # Allow time for initial rendering

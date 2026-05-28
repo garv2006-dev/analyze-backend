@@ -55,6 +55,73 @@ def file_to_base64(file_path: str) -> str:
     with open(file_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
+def clean_and_parse_json(s: str) -> dict:
+    """
+    Cleans and parses a JSON string that may contain markdown wrappers or JavaScript-style comments.
+    """
+    original = s
+    # 1. Strip markdown code block wrappers
+    s = s.strip()
+    if s.startswith("```"):
+        first_newline = s.find("\n")
+        if first_newline != -1:
+            s = s[first_newline:]
+        if s.endswith("```"):
+            s = s[:-3]
+    s = s.strip()
+    
+    # 2. Locate first '{' and last '}'
+    first_idx = s.find('{')
+    last_idx = s.rfind('}')
+    if first_idx != -1 and last_idx != -1:
+        s = s[first_idx:last_idx+1]
+        
+    # 3. Remove multi-line comments /* ... */
+    import re
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
+    
+    # 4. Remove single line comments (// ...) line by line, ignoring comments inside quoted strings
+    lines = []
+    for line in s.splitlines():
+        in_quotes = False
+        quote_char = None
+        comment_start = -1
+        
+        i = 0
+        while i < len(line):
+            char = line[i]
+            if char in ['"', "'"]:
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif quote_char == char:
+                    # check if quote is escaped
+                    escaped = False
+                    j = i - 1
+                    while j >= 0 and line[j] == '\\':
+                        escaped = not escaped
+                        j -= 1
+                    if not escaped:
+                        in_quotes = False
+                        quote_char = None
+            elif char == '/' and i + 1 < len(line) and line[i+1] == '/' and not in_quotes:
+                comment_start = i
+                break
+            i += 1
+            
+        if comment_start != -1:
+            line = line[:comment_start]
+        lines.append(line)
+        
+    s = "\n".join(lines).strip()
+    
+    # 5. Load JSON
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as decode_err:
+        logger.error(f"Failed to parse JSON even after cleaning. Error: {decode_err}\\nRaw Content:\\n{original}\\nCleaned String:\\n{s}")
+        raise
+
 async def analyze_chart(absolute_image_path: str, extracted_price: float = None) -> dict:
     """
     Sends the graph screenshot to OpenAI Vision API for deep market analysis.
@@ -181,15 +248,8 @@ Ensure it is a valid, parseable JSON block."""
             raw_content = response.choices[0].message.content.strip()
             logger.info("✔️ OpenAI response payload received. Parsing JSON content...")
         
-        # Strip markdown syntax wrappers if AI returned them
-        clean_json = raw_content
-        if clean_json.startswith("```json"):
-            clean_json = clean_json[7:]
-        if clean_json.endswith("```"):
-            clean_json = clean_json[:-3]
-        clean_json = clean_json.strip()
-        
-        parsed_data = json.loads(clean_json)
+        # Strip markdown syntax wrappers and javascript-style comments using robust parsing
+        parsed_data = clean_and_parse_json(raw_content)
         
         # Validate critical root fields exist
         required_keys = ["trend_direction", "confidence_score", "support_levels", "resistance_levels", "summary"]
@@ -219,9 +279,11 @@ Ensure it is a valid, parseable JSON block."""
                 }),
                 "signal": parsed_data.get("signal", "HOLD"),
                 "technical_analysis": parsed_data.get("technical_analysis", {}),
-                "trade_setup": parsed_data.get("trade_setup", {})
+                "trade_setup": parsed_data.get("trade_setup", {}),
+                "is_mock": False
             }
         }
+
         
     except Exception as err:
         logger.error(f"❌ OpenAI Vision analysis failed: {err}")
@@ -329,6 +391,8 @@ def simulate_vision_analysis(extracted_price: float = None) -> dict:
                 "entry_price": round(last_mock_value, 2),
                 "stop_loss": s1 if trend == "BULLISH" else round(last_mock_value * 1.015, 2),
                 "target_price": r1 if trend == "BULLISH" else round(last_mock_value * 0.985, 2)
-            }
+            },
+            "is_mock": True
+
         }
     }

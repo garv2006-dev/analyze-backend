@@ -73,13 +73,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount the saved graph screenshots directory statically
-# The screenshots will be accessible via HTTP at http://localhost:5000/screenshots/filename.png
-app.mount("/screenshots", StaticFiles(directory=str(config.SCREENSHOTS_DIR)), name="screenshots")
 
 # Mount predictions CRUD routes
 app.include_router(predictions_router, prefix="/api/predictions", tags=["Predictions"])
 app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
+
+# Serve local screenshot files statically for dashboard fallback
+app.mount("/screenshots", StaticFiles(directory=str(config.SCREENSHOTS_DIR)), name="screenshots")
+
 
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):

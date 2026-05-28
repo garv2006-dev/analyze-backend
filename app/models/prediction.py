@@ -50,6 +50,8 @@ class StockPrediction(Base):
             "resistance_levels": self.resistance_levels,
             "prediction_json": self.prediction_json,
             "ai_summary": self.ai_summary,
+            "is_mock": self.prediction_json.get("is_mock", False) if isinstance(self.prediction_json, dict) else False,
+
             
             # Legacy structures for existing frontend components:
             "extracted_metrics": {
