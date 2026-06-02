@@ -26,29 +26,19 @@ async_client = None
 gemini_client = None
 
 if not config.IS_MOCK_MODE:
-    if config.IS_GEMINI:
-        if genai:
-            logger.info("🔌 Initializing official Google GenAI SDK client...")
-            gemini_client = genai.Client(api_key=config.OPENAI_API_KEY)
-        else:
-            logger.warning("⚠️ google-genai SDK is not installed! Falling back to standard OpenAI SDK for Gemini...")
-            async_client = AsyncOpenAI(
-                api_key=config.OPENAI_API_KEY,
-                base_url=config.OPENAI_BASE_URL
-            )
-    else:
-        default_headers = {}
-        if config.IS_OPENROUTER:
-            if config.OPENROUTER_REFERER:
-                default_headers["HTTP-Referer"] = config.OPENROUTER_REFERER
-            if config.OPENROUTER_TITLE:
-                default_headers["X-OpenRouter-Title"] = config.OPENROUTER_TITLE
+    default_headers = {}
+    if config.IS_OPENROUTER:
+        if config.OPENROUTER_REFERER:
+            default_headers["HTTP-Referer"] = config.OPENROUTER_REFERER
+        if config.OPENROUTER_TITLE:
+            default_headers["X-OpenRouter-Title"] = config.OPENROUTER_TITLE
 
-        async_client = AsyncOpenAI(
-            api_key=config.OPENAI_API_KEY,
-            base_url=config.OPENAI_BASE_URL,
-            default_headers=default_headers if default_headers else None
-        )
+    logger.info("🔌 Initializing AsyncOpenAI client...")
+    async_client = AsyncOpenAI(
+        api_key=config.OPENAI_API_KEY,
+        base_url=config.OPENAI_BASE_URL,
+        default_headers=default_headers if default_headers else None
+    )
 
 def file_to_base64(file_path: str) -> str:
     """Reads a file and converts it into a base64 encoded string."""
@@ -209,44 +199,49 @@ Ensure it is a valid, parseable JSON block."""
     raw_content = ""
     
     try:
-        if config.IS_GEMINI and gemini_client:
-            logger.info(f"🧠 Initializing active Google GenAI (Gemini) pipeline (model: {config.AI_MODEL})...")
-            image = Image.open(absolute_image_path)
-            response = await gemini_client.aio.models.generate_content(
-                model=config.AI_MODEL,
-                contents=[image, prompt],
-                config=types.GenerateContentConfig(
-                    max_output_tokens=1000,
-                    temperature=0.4
-                )
-            )
-            raw_content = response.text.strip()
-            logger.info("✔️ Gemini response payload received. Parsing JSON content...")
-        else:
-            logger.info(f"🧠 Initializing active OpenAI Vision reasoning pipeline (model: {config.AI_MODEL})...")
-            base64_image = file_to_base64(absolute_image_path)
-            data_url = f"data:image/png;base64,{base64_image}"
-            
-            response = await async_client.chat.completions.create(
-                model=config.AI_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": data_url
+        logger.info(f"🧠 Initializing active Vision reasoning pipeline (model: {config.AI_MODEL})...")
+        base64_image = file_to_base64(absolute_image_path)
+        data_url = f"data:image/png;base64,{base64_image}"
+        
+        max_retries = 3
+        retry_delay = 5.0
+        response = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = await async_client.chat.completions.create(
+                    model=config.AI_MODEL,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": data_url
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=1000
-            )
-            raw_content = response.choices[0].message.content.strip()
-            logger.info("✔️ OpenAI response payload received. Parsing JSON content...")
+                            ]
+                        }
+                    ],
+                    max_tokens=4000,
+                    response_format={"type": "json_object"}
+                )
+                break
+            except Exception as api_err:
+                err_msg = str(api_err)
+                is_rate_limit = "429" in err_msg or "rate limit" in err_msg.lower()
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ API Rate Limit (429) encountered. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                    import asyncio
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise api_err
+        
+        raw_content = response.choices[0].message.content.strip()
+        logger.info("✔️ AI response payload received. Parsing JSON content...")
         
         # Strip markdown syntax wrappers and javascript-style comments using robust parsing
         parsed_data = clean_and_parse_json(raw_content)
@@ -258,7 +253,12 @@ Ensure it is a valid, parseable JSON block."""
                 raise ValueError(f"Missing required response field: '{key}'")
                 
         # Guide current value and support/resistance if extracted_price is provided
-        current_value = parsed_data.get("current_value", sum(parsed_data["support_levels"])/len(parsed_data["support_levels"]) * 1.01)
+        if parsed_data.get("support_levels"):
+            default_current = sum(parsed_data["support_levels"])/len(parsed_data["support_levels"]) * 1.01
+        else:
+            default_current = 0.0
+            
+        current_value = parsed_data.get("current_value", default_current)
         if extracted_price is not None:
             current_value = extracted_price
             

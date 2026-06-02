@@ -51,7 +51,7 @@ IS_GEMINI = OPENAI_API_KEY.startswith("AIzaSy")
 
 # Configure AI model and endpoint base URL dynamically
 if IS_GEMINI:
-    AI_MODEL = os.getenv("AI_MODEL", "gemini-1.5-flash")
+    AI_MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
     OPENROUTER_REFERER = None
     OPENROUTER_TITLE = None

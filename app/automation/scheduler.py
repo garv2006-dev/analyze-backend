@@ -150,9 +150,12 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
         try:
             logger.info("☁️ Attempting to upload screenshot to Cloudinary...")
             from backend.app.services import cloudinary as cloudinary_service
-            cloudinary_url = await asyncio.to_thread(
-                cloudinary_service.upload_image, 
-                capture_result["absolute_path"]
+            cloudinary_url = await asyncio.wait_for(
+                asyncio.to_thread(
+                    cloudinary_service.upload_image, 
+                    capture_result["absolute_path"]
+                ),
+                timeout=15.0
             )
             if cloudinary_url:
                 image_path_to_save = cloudinary_url
@@ -205,14 +208,18 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
         return prediction
         
     finally:
-        # Always clean up the temporary local screenshot to avoid storing images in the codebase folder (preventing local disk bloat)
+        # Clean up local screenshot only if successfully uploaded to Cloudinary.
+        # Preserve the local file if fallback to local storage occurred so the frontend can serve it.
         try:
             if 'capture_result' in locals() and capture_result and "absolute_path" in capture_result:
-                from pathlib import Path
-                local_file = Path(capture_result["absolute_path"])
-                if local_file.exists():
-                    local_file.unlink()
-                    logger.info(f"🗑️ Cleaned up temporary local screenshot file: {local_file.name}")
+                if 'image_path_to_save' in locals() and image_path_to_save and (image_path_to_save.startswith("http://") or image_path_to_save.startswith("https://")):
+                    from pathlib import Path
+                    local_file = Path(capture_result["absolute_path"])
+                    if local_file.exists():
+                        local_file.unlink()
+                        logger.info(f"🗑️ Cleaned up temporary local screenshot file: {local_file.name}")
+                else:
+                    logger.info("💾 Preserved local screenshot for static serving (Cloudinary upload fell back).")
         except Exception as cleanup_err:
             logger.warning(f"⚠️ Failed to delete temporary local screenshot: {cleanup_err}")
 
