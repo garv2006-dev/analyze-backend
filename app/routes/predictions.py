@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from backend.app.database import get_db
 from backend.app.models.prediction import StockPrediction
+from backend.app.models.hidden_prediction import HiddenPrediction
 from backend.app.automation.scheduler import execute_analysis_cycle, get_saved_interval, update_scheduler_interval
 
 logger = logging.getLogger("Routes")
@@ -33,8 +34,11 @@ async def get_predictions(
     """Fetches paginated list of historical stock graph predictions, ordered descending by capture time, optionally filtered by symbol."""
     logger.info(f"📥 GET /api/predictions?page={page}&page_size={page_size}&limit={limit}&symbol={symbol} request received.")
     try:
+        from datetime import datetime, timezone
+        
         # Build counting query
         count_query = select(func.count()).select_from(StockPrediction)
+        count_query = count_query.where(StockPrediction.id.not_in(select(HiddenPrediction.prediction_id)))
         if symbol and symbol.upper() != 'ALL':
             count_query = count_query.where(StockPrediction.stock_symbol == symbol.upper())
             
@@ -43,14 +47,14 @@ async def get_predictions(
 
         if limit is not None:
             # Maintain backward compatibility if limit parameter is explicitly passed
-            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc())
+            query = select(StockPrediction).where(StockPrediction.id.not_in(select(HiddenPrediction.prediction_id))).order_by(StockPrediction.captured_at.desc())
             if symbol and symbol.upper() != 'ALL':
                 query = query.where(StockPrediction.stock_symbol == symbol.upper())
             query = query.limit(limit)
             active_page_size = limit
         else:
             offset = (page - 1) * page_size
-            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc())
+            query = select(StockPrediction).where(StockPrediction.id.not_in(select(HiddenPrediction.prediction_id))).order_by(StockPrediction.captured_at.desc())
             if symbol and symbol.upper() != 'ALL':
                 query = query.where(StockPrediction.stock_symbol == symbol.upper())
             query = query.offset(offset).limit(page_size)
@@ -161,31 +165,17 @@ async def delete_prediction(id: int, db: AsyncSession = Depends(get_db)):
                 detail=f"Prediction record with ID #{id} was not found."
             )
             
-        # Clean up image from storage if it exists
-        try:
-            if row.image_path and (row.image_path.startswith("http://") or row.image_path.startswith("https://")):
-                # It's a Cloudinary image, delete it asynchronously in a background thread
-                from backend.app.services import cloudinary as cloudinary_service
-                logger.info(f"🗑️ Deleting associated Cloudinary screenshot: {row.image_path}")
-                import asyncio
-                await asyncio.to_thread(cloudinary_service.delete_image, row.image_path)
-            else:
-                # Local screenshot file
-                image_file_path = config.SCREENSHOTS_DIR / row.image_path
-                if image_file_path.exists():
-                    image_file_path.unlink()
-                    logger.info(f"🗑️ Deleted associated local screenshot file: {image_file_path}")
-        except Exception as file_err:
-            logger.warning(f"Could not delete image file {row.image_path}: {file_err}")
-
-
-        # Delete database row
-        await db.delete(row)
-        await db.commit()
+        # Check if already hidden to prevent duplicates
+        check_query = select(HiddenPrediction).where(HiddenPrediction.prediction_id == id)
+        check_result = await db.execute(check_query)
+        if not check_result.scalars().first():
+            hidden_pred = HiddenPrediction(prediction_id=id)
+            db.add(hidden_pred)
+            await db.commit()
         
         return {
             "success": True,
-            "message": f"Prediction record #{id} and its associated screenshot deleted successfully."
+            "message": f"Prediction record #{id} has been hidden from the dashboard."
         }
     except HTTPException:
         raise
@@ -268,4 +258,53 @@ async def trigger_manual_analysis(request_data: Optional[TriggerRequest] = None,
         raise HTTPException(
             status_code=500,
             detail=f"On-demand browser capture/AI analysis cycle failed: {error}"
+        )
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: list[int] = []
+    delete_all: bool = False
+
+@router.post("/bulk-delete")
+async def bulk_delete_predictions(request_data: BulkDeleteRequest, db: AsyncSession = Depends(get_db)):
+    """Hides multiple prediction records by adding them to the hidden_predictions table."""
+    logger.info(f"📥 POST /api/predictions/bulk-delete request received. (delete_all={request_data.delete_all})")
+    try:
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from backend.app.database import is_fallback_mode
+
+        if request_data.delete_all:
+            # Find all prediction IDs that are not already hidden
+            query = select(StockPrediction.id).where(StockPrediction.id.not_in(select(HiddenPrediction.prediction_id)))
+            result = await db.execute(query)
+            ids_to_hide = result.scalars().all()
+        else:
+            ids_to_hide = request_data.ids
+            
+        if not ids_to_hide:
+            return {"success": True, "message": "No logs to hide."}
+
+        # Add all IDs to the HiddenPrediction table
+        hidden_objects = [{"prediction_id": pid} for pid in ids_to_hide]
+        
+        # Use simple iterative insert and ignore unique constraint errors to be dialect-agnostic
+        for pid in ids_to_hide:
+            check_query = select(HiddenPrediction).where(HiddenPrediction.prediction_id == pid)
+            check_result = await db.execute(check_query)
+            if not check_result.scalars().first():
+                db.add(HiddenPrediction(prediction_id=pid))
+
+        await db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Successfully hidden {len(ids_to_hide)} prediction records from the dashboard."
+        }
+    except Exception as error:
+        await db.rollback()
+        logger.error(f"Failed to bulk hide prediction records: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while bulk hiding prediction records."
         )
