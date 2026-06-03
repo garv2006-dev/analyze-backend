@@ -155,7 +155,7 @@ async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIF
                     cloudinary_service.upload_image, 
                     capture_result["absolute_path"]
                 ),
-                timeout=15.0
+                timeout=60.0
             )
             if cloudinary_url:
                 image_path_to_save = cloudinary_url

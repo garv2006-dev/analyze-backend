@@ -231,10 +231,10 @@ Ensure it is a valid, parseable JSON block."""
                 break
             except Exception as api_err:
                 err_msg = str(api_err)
-                is_rate_limit = "429" in err_msg or "rate limit" in err_msg.lower()
-                if is_rate_limit and attempt < max_retries - 1:
+                is_retryable = "429" in err_msg or "rate limit" in err_msg.lower() or "connection" in err_msg.lower() or "timeout" in err_msg.lower() or "502" in err_msg or "503" in err_msg
+                if is_retryable and attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
-                    logger.warning(f"⚠️ API Rate Limit (429) encountered. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                    logger.warning(f"⚠️ API Error encountered ({err_msg}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
                     import asyncio
                     await asyncio.sleep(wait_time)
                 else:
@@ -261,6 +261,8 @@ Ensure it is a valid, parseable JSON block."""
         current_value = parsed_data.get("current_value", default_current)
         if extracted_price is not None:
             current_value = extracted_price
+            
+        logger.info(f"✔️ Live Price visually extracted by AI from screenshot: ₹{current_value}")
             
         # Re-map parsed structure into table-friendly layout
         return {
