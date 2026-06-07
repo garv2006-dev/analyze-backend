@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend requirements list
-COPY backend/requirements.txt /app/backend/
+COPY requirements.txt /app/backend/
 
 # Install python modules
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 RUN playwright install --with-deps chromium
 
 # Copy the entire backend workspace
-COPY backend/ /app/backend
+COPY . /app/backend
 
 # Expose server port
 EXPOSE 5000
