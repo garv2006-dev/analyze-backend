@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from backend.app import config
 from backend.app import database
 from backend.app.models.prediction import StockPrediction
@@ -246,21 +247,50 @@ async def trigger_incremental_training():
 
 
 async def run_pipeline_cycle():
-    """Triggered by the APScheduler background daemon."""
-    logger.info("⏰ [CRON ENGINE] Triggering background chart capture & analysis cycle...")
+    """Triggered by the APScheduler background daemon. Runs analysis for ALL saved watchlist assets sequentially."""
+    logger.info("⏰ [CRON ENGINE] Triggering background chart capture & analysis cycle for all saved assets...")
     
     if not is_within_market_hours():
         logger.info("⏸️ Outside configured market hours. Skipping background capture cycle.")
         return
+    
+    # Load all saved watchlist assets from the database
+    assets_to_run = []
+    try:
+        from backend.app.models.saved_asset import SavedAsset
+        async with database.SessionLocal() as db:
+            result = await db.execute(select(SavedAsset).order_by(SavedAsset.created_at.asc()))
+            rows = result.scalars().all()
+            assets_to_run = [(row.symbol, row.url) for row in rows]
+    except Exception as load_err:
+        logger.error(f"Failed to load saved assets from DB for scheduler: {load_err}")
+    
+    # Fallback to default if DB is empty or failed to load
+    if not assets_to_run:
+        logger.warning("No saved assets found in DB. Falling back to default NIFTY50 target.")
+        assets_to_run = [("NIFTY50", config.TARGET_URL)]
+
+    total = len(assets_to_run)
+    logger.info(f"⏰ [CRON ENGINE] Running analysis for {total} asset(s): {[s for s, _ in assets_to_run]}")
+    
+    success_count = 0
+    for idx, (symbol, url) in enumerate(assets_to_run, 1):
+        logger.info(f"⏰ [CRON ENGINE] [{idx}/{total}] Analyzing: {symbol} ({url})")
+        async with database.SessionLocal() as session:
+            try:
+                prediction = await execute_analysis_cycle(session, stock_symbol=symbol, target_url=url)
+                await session.commit()
+                logger.info(f"✔️ [CRON ENGINE] [{idx}/{total}] {symbol} cycle complete. ID: #{prediction.id}")
+                success_count += 1
+            except Exception as error:
+                await session.rollback()
+                logger.error(f"❌ [CRON ENGINE] [{idx}/{total}] {symbol} analysis failed: {error}")
         
-    async with database.SessionLocal() as session:
-        try:
-            prediction = await execute_analysis_cycle(session)
-            await session.commit()
-            logger.info(f"✔️ [CRON ENGINE] Background automated cycle successful. ID: #{prediction.id}\n")
-        except Exception as error:
-            await session.rollback()
-            logger.error(f"❌ [CRON ENGINE] Background analysis sequence failed: {error}")
+        # Delay between assets to respect AI API rate limits (Gemini free tier: 15 RPM)
+        if idx < total:
+            await asyncio.sleep(8)
+    
+    logger.info(f"⏰ [CRON ENGINE] Cycle complete: {success_count}/{total} assets analyzed successfully.\n")
 
 def start_scheduler():
     """Starts the cron automation background engine using a dynamic, user-configured interval."""

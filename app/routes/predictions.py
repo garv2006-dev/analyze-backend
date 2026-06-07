@@ -261,6 +261,62 @@ async def trigger_manual_analysis(request_data: Optional[TriggerRequest] = None,
         )
 
 
+@router.post("/trigger-all")
+async def trigger_all_assets():
+    """
+    Runs the full capture + AI analysis pipeline for ALL saved watchlist assets sequentially.
+    Returns a per-asset results summary with individual success/failure status.
+    """
+    logger.info("📥 POST /api/predictions/trigger-all request received.")
+    from backend.app.models.saved_asset import SavedAsset
+    from backend.app import database as db_module
+    from sqlalchemy.future import select as sa_select
+
+    # Load all saved assets
+    assets_to_run = []
+    try:
+        async with db_module.SessionLocal() as db:
+            result = await db.execute(sa_select(SavedAsset).order_by(SavedAsset.created_at.asc()))
+            rows = result.scalars().all()
+            assets_to_run = [(row.symbol, row.url) for row in rows]
+    except Exception as load_err:
+        logger.error(f"Failed to load saved assets: {load_err}")
+
+    if not assets_to_run:
+        from backend.app import config as app_config
+        assets_to_run = [("NIFTY50", app_config.TARGET_URL)]
+
+    total = len(assets_to_run)
+    logger.info(f"🚀 trigger-all: Running analysis for {total} asset(s): {[s for s, _ in assets_to_run]}")
+
+    results = []
+    for idx, (symbol, url) in enumerate(assets_to_run, 1):
+        logger.info(f"🚀 trigger-all [{idx}/{total}]: Analyzing {symbol}...")
+        async with db_module.SessionLocal() as session:
+            try:
+                prediction = await execute_analysis_cycle(session, stock_symbol=symbol, target_url=url)
+                await session.commit()
+                results.append({"symbol": symbol, "success": True, "id": prediction.id})
+                logger.info(f"✔️ trigger-all [{idx}/{total}]: {symbol} → ID #{prediction.id}")
+            except Exception as err:
+                await session.rollback()
+                logger.error(f"❌ trigger-all [{idx}/{total}]: {symbol} failed — {err}")
+                results.append({"symbol": symbol, "success": False, "error": str(err)})
+
+        # Delay between assets to respect API rate limits (important for Gemini free tier: 15 RPM)
+        if idx < total:
+            import asyncio as _asyncio
+            await _asyncio.sleep(8)
+
+    success_count = sum(1 for r in results if r["success"])
+    return {
+        "success": True,
+        "total": total,
+        "completed": success_count,
+        "results": results
+    }
+
+
 class BulkDeleteRequest(BaseModel):
     ids: list[int] = []
     delete_all: bool = False

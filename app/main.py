@@ -17,7 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from backend.app import config
 from backend.app import database
 from backend.app.database import get_db, Base
-from backend.app.routes import predictions_router, chat_router
+from backend.app.routes import predictions_router, chat_router, assets_router
+from backend.app.models.saved_asset import SavedAsset  # noqa: F401 — ensure table is registered in metadata
 from backend.app.services.websocket import ws_manager
 from backend.app.automation.scheduler import start_scheduler, scheduler
 
@@ -77,6 +78,7 @@ app.add_middleware(
 # Mount predictions CRUD routes
 app.include_router(predictions_router, prefix="/api/predictions", tags=["Predictions"])
 app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
+app.include_router(assets_router, prefix="/api/assets", tags=["Assets"])
 
 # Serve local screenshot files statically for dashboard fallback
 app.mount("/screenshots", StaticFiles(directory=str(config.SCREENSHOTS_DIR)), name="screenshots")

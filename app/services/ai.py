@@ -209,9 +209,10 @@ Ensure it is a valid, parseable JSON block."""
         
         for attempt in range(max_retries):
             try:
-                response = await async_client.chat.completions.create(
-                    model=config.AI_MODEL,
-                    messages=[
+                # Build kwargs — response_format is NOT supported by Gemini via OpenAI compat layer
+                api_kwargs = {
+                    "model": config.AI_MODEL,
+                    "messages": [
                         {
                             "role": "user",
                             "content": [
@@ -225,16 +226,30 @@ Ensure it is a valid, parseable JSON block."""
                             ]
                         }
                     ],
-                    max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
+                    "max_tokens": 4000,
+                }
+                # Only add response_format for non-Gemini providers (Gemini does not support it)
+                if not config.IS_GEMINI:
+                    api_kwargs["response_format"] = {"type": "json_object"}
+                    
+                response = await async_client.chat.completions.create(**api_kwargs)
                 break
             except Exception as api_err:
                 err_msg = str(api_err)
-                is_retryable = "429" in err_msg or "rate limit" in err_msg.lower() or "connection" in err_msg.lower() or "timeout" in err_msg.lower() or "502" in err_msg or "503" in err_msg
+                is_retryable = (
+                    "429" in err_msg
+                    or "503" in err_msg
+                    or "502" in err_msg
+                    or "overloaded" in err_msg.lower()
+                    or "rate limit" in err_msg.lower()
+                    or "resource exhausted" in err_msg.lower()
+                    or "quota" in err_msg.lower()
+                    or "connection" in err_msg.lower()
+                    or "timeout" in err_msg.lower()
+                )
                 if is_retryable and attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)
-                    logger.warning(f"⚠️ API Error encountered ({err_msg}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                    wait_time = retry_delay * (2 ** attempt)  # 5s, 10s, 20s
+                    logger.warning(f"⚠️ API rate limit / overload hit ({err_msg[:80]}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
                     import asyncio
                     await asyncio.sleep(wait_time)
                 else:
