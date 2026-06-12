@@ -253,22 +253,40 @@ async def _async_capture_chart_impl(target_url: str = None, stock_symbol: str = 
                             logger.info("⏱ Waiting 4000ms for 5-minute candlestick data to load...")
                             await page.wait_for_timeout(4000)
                             
+                            # Clean DOM inside the iframe to remove overlays blocking clicks
+                            try:
+                                await chart_frame.evaluate("""
+                                    () => {
+                                        const hideSelectors = [
+                                            '.rodal-mask', '.rodal', '[class*="rodal"]', '.modal-backdrop', '.fade.show'
+                                        ];
+                                        document.querySelectorAll(hideSelectors.join(',')).forEach(el => {
+                                            if (el && el.style) {
+                                                el.style.display = 'none';
+                                            }
+                                        });
+                                    }
+                                """)
+                            except Exception:
+                                pass
+
                             # Trigger direct chart download via the camera snapshot button
                             logger.info("📸 Locating TradingView camera snapshot button (#header-toolbar-screenshot)...")
                             camera_btn = chart_frame.locator("#header-toolbar-screenshot")
                             if await camera_btn.count() > 0 and await camera_btn.first.is_visible():
-                                await camera_btn.first.click()
+                                await camera_btn.first.click(timeout=3000)
                                 await page.wait_for_timeout(1000)
                                 
                                 download_option = chart_frame.locator("text='Download image'")
                                 if await download_option.count() > 0 and await download_option.first.is_visible():
-                                    async with page.expect_download(timeout=15000) as download_info:
-                                        await download_option.first.click()
+                                    async with page.expect_download(timeout=10000) as download_info:
+                                        await download_option.first.click(timeout=3000)
                                     download = await download_info.value
                                     await download.save_as(str(absolute_path))
                                     downloaded_successfully = True
                     except Exception as tv_err:
-                        logger.warning(f"⚠️ Error during TradingView frame interaction: {tv_err}")
+                        # Log simple message without polluting terminal with playwright stack trace
+                        logger.info(f"ℹ️ TradingView direct snapshot interaction bypassed: {tv_err}")
                         
                     # Fallback to standard page screenshot if TradingView download failed
                     if not downloaded_successfully:

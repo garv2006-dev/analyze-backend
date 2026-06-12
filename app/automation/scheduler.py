@@ -1,310 +1,198 @@
 import logging
 import asyncio
-import json
 from pathlib import Path
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+
 from backend.app import config
 from backend.app import database
-from backend.app.models.prediction import StockPrediction
+from backend.app.models.user import User
+from backend.app.models.target_url import TargetURL
+from backend.app.models.screenshot import Screenshot
+from backend.app.models.prediction import Prediction
+from backend.app.models.log import Log
 from backend.app.services import browser, ai
+from backend.app.services.change_detector import detect_and_highlight_changes
+from backend.app.services.rate_limiter import check_and_increment_rate_limit
 from backend.app.services.websocket import ws_manager
+from backend.app.services.time_helper import check_monitoring_hours
 
 logger = logging.getLogger("Scheduler")
 logger.setLevel(logging.INFO)
 
 scheduler = AsyncIOScheduler()
-SETTINGS_FILE = Path(__file__).resolve().parent.parent / "scheduler_settings.json"
 
-def get_saved_settings() -> dict:
-    """Helper to load all persistent scheduler settings from disk with robust defaults."""
-    defaults = {
-        "interval_minutes": 5,
-        "only_during_market_hours": False,
-        "market_start_time": "09:15",
-        "market_end_time": "15:30",
-        "exclude_weekends": True
-    }
-    if SETTINGS_FILE.exists():
-        try:
-            with open(SETTINGS_FILE, "r") as f:
-                data = json.load(f)
-                # Merge with defaults
-                for k, v in defaults.items():
-                    if k not in data:
-                        data[k] = v
-                return data
-        except Exception as e:
-            logger.warning(f"Could not load saved scheduler settings: {e}")
-    return defaults
-
-def save_settings(settings: dict):
-    """Helper to persist all scheduler settings to disk."""
-    try:
-        current = get_saved_settings()
-        current.update(settings)
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(current, f)
-    except Exception as e:
-        logger.error(f"Failed to persist scheduler settings: {e}")
-
-def get_saved_interval() -> int:
-    return int(get_saved_settings().get("interval_minutes", 5))
-
-def update_scheduler_interval(minutes: int) -> bool:
-    """Reschedules the active background chart analysis job dynamically and persists settings."""
-    save_settings({"interval_minutes": minutes})
-    try:
-        scheduler.reschedule_job('chart_pipeline_job', trigger='interval', minutes=minutes)
-        logger.info(f"✔️ Scheduler successfully rescheduled to run every {minutes} minutes.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to reschedule job dynamically: {e}")
-        return False
-
-def update_scheduler_settings_dict(settings: dict) -> bool:
-    """Updates active background scheduler settings dynamically and reschedules if needed."""
-    save_settings(settings)
-    interval = int(settings.get("interval_minutes", get_saved_interval()))
-    try:
-        try:
-            scheduler.reschedule_job('chart_pipeline_job', trigger='interval', minutes=interval)
-            logger.info(f"✔️ Scheduler successfully rescheduled to run every {interval} minutes.")
-        except Exception as lookup_err:
-            logger.warning(f"Could not reschedule job directly (might not exist): {lookup_err}. Re-adding job...")
-            try:
-                scheduler.remove_job('chart_pipeline_job')
-            except Exception:
-                pass
-            scheduler.add_job(run_pipeline_cycle, 'interval', minutes=interval, id='chart_pipeline_job')
-            logger.info(f"✔️ Job successfully re-added to run every {interval} minutes.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to reschedule job dynamically: {e}")
-        return False
-
-from datetime import datetime, time
-
-def is_within_market_hours() -> bool:
-    settings = get_saved_settings()
-    if not settings.get("only_during_market_hours", False):
-        return True
-        
-    # Detect timezone. Default to Asia/Kolkata for NIFTY/groww.in targets,
-    # otherwise fall back to system local timezone.
-    tz_name = "Asia/Kolkata"
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(tz_name)
-        now = datetime.now(tz)
-        logger.info(f"Checking market hours using timezone {tz_name}: current time is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    except Exception as tz_err:
-        logger.warning(f"Failed to use timezone {tz_name}: {tz_err}. Falling back to system local time.")
-        now = datetime.now()
-        
-    if settings.get("exclude_weekends", True) and now.weekday() >= 5: # Saturday/Sunday
-        return False
-        
-    current_time = now.time()
-    try:
-        start_str = settings.get("market_start_time", "09:15")
-        end_str = settings.get("market_end_time", "15:30")
-        
-        start_h, start_m = map(int, start_str.split(":"))
-        end_h, end_m = map(int, end_str.split(":"))
-        
-        start_t = time(start_h, start_m)
-        end_t = time(end_h, end_m)
-        
-        if start_t <= end_t:
-            return start_t <= current_time <= end_t
-        else:
-            # Crosses midnight (e.g. 21:15 to 03:30)
-            return current_time >= start_t or current_time <= end_t
-    except Exception as e:
-        logger.error(f"Error checking market hours: {e}")
-        return True # Fallback to True to not block runs on parser error
-
-async def execute_analysis_cycle(session: AsyncSession, stock_symbol: str = "NIFTY50", target_url: str = None) -> StockPrediction:
+async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
     """
-    Core pipeline executor that orchestrates browser capture, OpenAI Vision analysis,
-    database writing, and WebSocket broadcasting.
-    
-    Can be run both by background scheduler and immediate manual endpoint triggers.
+    Orchestrates the screenshot capture, change detection, and AI analysis cycle
+    for a single target URL. Enforces rate limits and logs audit details.
     """
-    logger.info("⚡ Executing core chart analysis pipeline cycle...")
-    prediction_success = False
+    user_id = target.user_id
+    url_id = target.id
+    target_url = target.url
     
-    # 1. Capture dynamic chart screenshot using Playwright
-    capture_result = await browser.capture_chart(target_url=target_url, stock_symbol=stock_symbol)
+    # 1. Enforce rate limiting
+    allowed, limit_msg = await check_and_increment_rate_limit(db, user_id)
+    if not allowed:
+        # Rate limit hit: log block and return
+        logger.warning(f"Skipping capture for user {user_id} due to rate limits: {limit_msg}")
+        return
+        
+    logger.info(f"⚡ Running monitoring scan for User {user_id} on URL: {target_url}")
     
     try:
-        # 2. Feed image to OpenAI Vision API (or dynamic offline simulation)
-        extracted_price = capture_result.get("extracted_price")
-        ai_analysis = await ai.analyze_chart(capture_result["absolute_path"], extracted_price=extracted_price)
-        
-        # Initialize variable so it is always in locals() for the finally block
-        image_path_to_save = None
-        
-        # 2.5. Upload image to Cloudinary with safe fallback to local storage
-        try:
-            logger.info("☁️ Attempting to upload screenshot to Cloudinary...")
-            from backend.app.services import cloudinary as cloudinary_service
-            cloudinary_url = await asyncio.wait_for(
-                asyncio.to_thread(
-                    cloudinary_service.upload_image, 
-                    capture_result["absolute_path"]
-                ),
-                timeout=60.0
-            )
-            if cloudinary_url:
-                image_path_to_save = cloudinary_url
-                logger.info(f"☁️ Cloudinary upload successful: {cloudinary_url}")
-            else:
-                logger.warning("⚠️ Cloudinary upload returned empty URL. Falling back to local storage.")
-        except Exception as upload_err:
-            logger.error(f"❌ Cloudinary upload failed due to network or config error: {upload_err}")
-            logger.warning("⚠️ Falling back to local storage for static serving.")
-
-        if not image_path_to_save:
-            # Fall back to storing filename locally (handled by FastAPI StaticFiles at /screenshots)
-            image_path_to_save = capture_result["filename"]
-        
-        # 3. Create the database record
-        prediction = StockPrediction(
-            stock_symbol=stock_symbol,
-            image_path=image_path_to_save,
-            trend_direction=ai_analysis["trend_direction"],
-            confidence_score=ai_analysis["confidence_score"],
-            support_levels=ai_analysis["support_levels"],
-            resistance_levels=ai_analysis["resistance_levels"],
-            prediction_json=ai_analysis["prediction_json"],
-            ai_summary=ai_analysis["ai_summary"]
+        # 2. Capture screenshot using Playwright browser service
+        capture_log = Log(
+            user_id=user_id,
+            event_type="SCREENSHOT_CAPTURE",
+            message=f"Capturing screenshot of URL '{target_url}'..."
         )
+        db.add(capture_log)
+        await db.commit()
         
-        session.add(prediction)
-        # Save transaction
-        await session.flush()
-        await session.refresh(prediction)
+        capture_result = await browser.capture_chart(target_url=target_url, stock_symbol="TARGET")
         
-        logger.info(f"💾 Prediction persisted successfully with ID #{prediction.id}")
+        # 3. Detect visual changes if there was a previous screenshot
+        prev_query = select(Screenshot).where(
+            Screenshot.url_id == url_id
+        ).order_by(Screenshot.timestamp.desc()).limit(1)
+        prev_res = await db.execute(prev_query)
+        prev_screenshot = prev_res.scalars().first()
         
-        # 4. Broadcast the newly created prediction over all active WebSockets
-        prediction_dict = prediction.to_dict()
+        highlighted_image_path = None
+        if prev_screenshot:
+            prev_abs_path = str(config.SCREENSHOTS_DIR / prev_screenshot.image_path)
+            highlight_filename = f"highlighted_{capture_result['filename']}"
+            
+            highlighted_image_path = detect_and_highlight_changes(
+                prev_path=prev_abs_path,
+                curr_path=capture_result["absolute_path"],
+                output_filename=highlight_filename
+            )
+            
+        # 4. Save screenshot details
+        new_screenshot = Screenshot(
+            user_id=user_id,
+            url_id=url_id,
+            image_path=capture_result["filename"],
+            highlighted_image_path=highlighted_image_path
+        )
+        db.add(new_screenshot)
+        await db.flush() # Generate ID
+        
+        # 5. Call AI reasoning (or simulation fallback) on screenshot
+        ai_log = Log(
+            user_id=user_id,
+            event_type="AI_PREDICTION",
+            message="Analyzing screenshot for visual patterns and change predictions..."
+        )
+        db.add(ai_log)
+        await db.commit()
+        
+        ai_analysis = await ai.analyze_chart(capture_result["absolute_path"], extracted_price=None)
+        
+        # Merge prediction JSON values
+        ai_result_payload = {
+            "trend_direction": ai_analysis["trend_direction"],
+            "confidence_score": ai_analysis["confidence_score"],
+            "support_levels": ai_analysis["support_levels"],
+            "resistance_levels": ai_analysis["resistance_levels"],
+            "ai_summary": ai_analysis["ai_summary"],
+            **ai_analysis.get("prediction_json", {})
+        }
+        
+        new_prediction = Prediction(
+            screenshot_id=new_screenshot.id,
+            ai_result=ai_result_payload,
+            confidence_score=ai_analysis["confidence_score"]
+        )
+        db.add(new_prediction)
+        
+        # Save audit success log
+        success_log = Log(
+            user_id=user_id,
+            event_type="MONITORING_CYCLE_SUCCESS",
+            message=f"Successfully captured and analyzed '{target_url}'. Changes Highlighted: {bool(highlighted_image_path)}."
+        )
+        db.add(success_log)
+        await db.commit()
+        
+        # 6. Broadcast updates via WebSocket
+        prediction_dict = new_prediction.to_dict(
+            screenshot_path=new_screenshot.image_path,
+            highlighted_path=new_screenshot.highlighted_image_path
+        )
         await ws_manager.broadcast({
             "success": True,
             "type": "NEW_PREDICTION",
+            "user_id": user_id,
             "data": prediction_dict
         })
         
-        prediction_success = True
+        logger.info(f"✔️ Successfully completed monitoring cycle for user {user_id}.")
+        return new_prediction
         
-        # Supervised Online Learning: Trigger non-blocking model training in the background
-        # only if the prediction was generated by actual Google AI reasoning!
-        if not prediction_dict.get("is_mock", False):
-            logger.info("🧠 [ONLINE LEARNING] Authentic AI prediction saved. Initializing background training task...")
-            asyncio.create_task(trigger_incremental_training())
-            
-        return prediction
-        
-    finally:
-        # Clean up local screenshot only if successfully uploaded to Cloudinary.
-        # Preserve the local file if fallback to local storage occurred so the frontend can serve it.
-        try:
-            if 'capture_result' in locals() and capture_result and "absolute_path" in capture_result:
-                if 'image_path_to_save' in locals() and image_path_to_save and (image_path_to_save.startswith("http://") or image_path_to_save.startswith("https://")):
-                    from pathlib import Path
-                    local_file = Path(capture_result["absolute_path"])
-                    if local_file.exists():
-                        local_file.unlink()
-                        logger.info(f"🗑️ Cleaned up temporary local screenshot file: {local_file.name}")
-                else:
-                    logger.info("💾 Preserved local screenshot for static serving (Cloudinary upload fell back).")
-        except Exception as cleanup_err:
-            logger.warning(f"⚠️ Failed to delete temporary local screenshot: {cleanup_err}")
-
-async def trigger_incremental_training():
-    """Asynchronously triggers the local PyTorch model training loop in the background."""
-    logger.info("🧠 [ONLINE LEARNING] Launching incremental background model training cycle...")
-    try:
-        from backend.app.ml.dataset import compile_training_dataset
-        from backend.app.ml.trainer import train_local_model
-        from backend.app.database import SessionLocal
-        
-        async with SessionLocal() as session:
-            dataset = await compile_training_dataset(session)
-            if len(dataset) >= 4:
-                # Execute a quick incremental update training of 10 epochs
-                # and run it in a separate thread using asyncio.to_thread to keep FastAPI event loop unblocked!
-                await asyncio.to_thread(train_local_model, dataset, epochs=10, batch_size=8)
-                logger.info("🧠 [ONLINE LEARNING] Background continuous model training completed successfully.")
-            else:
-                logger.info("🧠 [ONLINE LEARNING] Dataset is still too small for training (< 4 real samples). Skipping.")
-    except Exception as ml_err:
-        logger.error(f"🧠 [ONLINE LEARNING] Failed to run incremental background training: {ml_err}")
-
-
+    except Exception as e:
+        logger.error(f"Error in execution cycle for User {user_id}: {e}")
+        fail_log = Log(
+            user_id=user_id,
+            event_type="MONITORING_CYCLE_FAILED",
+            message=f"Failed capture/AI analysis cycle: {str(e)}"
+        )
+        db.add(fail_log)
+        await db.commit()
 
 async def run_pipeline_cycle():
-    """Triggered by the APScheduler background daemon. Runs analysis for ALL saved watchlist assets sequentially."""
-    logger.info("⏰ [CRON ENGINE] Triggering background chart capture & analysis cycle for all saved assets...")
-    
-    if not is_within_market_hours():
-        logger.info("⏸️ Outside configured market hours. Skipping background capture cycle.")
+    """
+    Triggered by the APScheduler background daemon every 1 minute.
+    Runs screenshot capture and AI checks for all users with active target URLs,
+    provided it is within the working hours window (09:15 AM - 03:15 PM).
+    """
+    # 1. Enforce schedule control working hours
+    is_within_hours, current_time_str, tz_name = check_monitoring_hours()
+    if not is_within_hours:
+        logger.info(f"⏸️ Scheduler check bypassed: outside working hours (current time is {current_time_str} {tz_name}).")
         return
+        
+    logger.info("⏰ [SCHEDULER] Scanning for active target URLs...")
     
-    # Load all saved watchlist assets from the database
-    assets_to_run = []
+    # 2. Query all active target URLs
+    active_targets = []
     try:
-        from backend.app.models.saved_asset import SavedAsset
         async with database.SessionLocal() as db:
-            result = await db.execute(select(SavedAsset).order_by(SavedAsset.created_at.asc()))
-            rows = result.scalars().all()
-            assets_to_run = [(row.symbol, row.url) for row in rows]
-    except Exception as load_err:
-        logger.error(f"Failed to load saved assets from DB for scheduler: {load_err}")
+            result = await db.execute(select(TargetURL).where(TargetURL.status == "active"))
+            active_targets = result.scalars().all()
+    except Exception as e:
+        logger.error(f"Failed to load active target URLs for scheduler: {e}")
+        return
+        
+    if not active_targets:
+        logger.info("No active target URLs currently configured for monitoring.")
+        return
+        
+    logger.info(f"⏰ [SCHEDULER] Found {len(active_targets)} active URL(s) to process.")
     
-    # Fallback to default if DB is empty or failed to load
-    if not assets_to_run:
-        logger.warning("No saved assets found in DB. Falling back to default NIFTY50 target.")
-        assets_to_run = [("NIFTY50", config.TARGET_URL)]
-
-    total = len(assets_to_run)
-    logger.info(f"⏰ [CRON ENGINE] Running analysis for {total} asset(s): {[s for s, _ in assets_to_run]}")
-    
-    success_count = 0
-    for idx, (symbol, url) in enumerate(assets_to_run, 1):
-        logger.info(f"⏰ [CRON ENGINE] [{idx}/{total}] Analyzing: {symbol} ({url})")
+    # Run capture cycle for each target URL asynchronously
+    for target in active_targets:
         async with database.SessionLocal() as session:
             try:
-                prediction = await execute_analysis_cycle(session, stock_symbol=symbol, target_url=url)
-                await session.commit()
-                logger.info(f"✔️ [CRON ENGINE] [{idx}/{total}] {symbol} cycle complete. ID: #{prediction.id}")
-                success_count += 1
-            except Exception as error:
-                await session.rollback()
-                logger.error(f"❌ [CRON ENGINE] [{idx}/{total}] {symbol} analysis failed: {error}")
-        
-        # Delay between assets to respect AI API rate limits (Gemini free tier: 15 RPM)
-        if idx < total:
-            await asyncio.sleep(8)
-    
-    logger.info(f"⏰ [CRON ENGINE] Cycle complete: {success_count}/{total} assets analyzed successfully.\n")
+                # Retrieve fresh row from session
+                res = await session.execute(select(TargetURL).where(TargetURL.id == target.id))
+                fresh_target = res.scalars().first()
+                if fresh_target and fresh_target.status == "active":
+                    await execute_user_monitoring_cycle(session, fresh_target)
+            except Exception as loop_err:
+                logger.error(f"Error executing task for Target ID {target.id}: {loop_err}")
 
 def start_scheduler():
-    """Starts the cron automation background engine using a dynamic, user-configured interval."""
-    interval = get_saved_interval()
-    logger.info(f"⏰ Initializing APScheduler Background Engine (Interval: {interval} minutes)...")
+    """Starts the background scheduler running the monitoring check every 1 minute."""
+    logger.info("⏰ Initializing APScheduler Background Engine (Interval: 1 minute)...")
     
-    # Setup interval trigger
-    scheduler.add_job(run_pipeline_cycle, 'interval', minutes=interval, id='chart_pipeline_job')
+    # Schedule interval check every 1 minute
+    scheduler.add_job(run_pipeline_cycle, 'interval', minutes=1, id='chart_pipeline_job')
     scheduler.start()
     
-    # Schedule a one-time bootstrap cycle after 5 seconds to guarantee immediate data for the frontend
-    async def delayed_bootstrap():
-        await asyncio.sleep(5)
-        logger.info("⚡ Executing initial server boot validation capture...")
-        await run_pipeline_cycle()
-        
-    asyncio.create_task(delayed_bootstrap())
+    # We do NOT run bootstrap cycle here because that could run outside working hours
+    # or before database tables are created. We will let the scheduler check naturally.

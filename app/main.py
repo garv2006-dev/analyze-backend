@@ -14,14 +14,29 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+
 from backend.app import config
 from backend.app import database
 from backend.app.database import get_db, Base
-from backend.app.routes import predictions_router, chat_router, assets_router
-from backend.app.models.saved_asset import SavedAsset  # noqa: F401 — ensure table is registered in metadata
 from backend.app.services.websocket import ws_manager
 from backend.app.automation.scheduler import start_scheduler, scheduler
 
+# Import all routers
+from backend.app.routes.predictions import router as predictions_router
+from backend.app.routes.chat import router as chat_router
+from backend.app.routes.auth import router as auth_router
+from backend.app.routes.target_url import router as target_url_router
+from backend.app.routes.monitoring import router as monitoring_router
+from backend.app.routes.logs import router as logs_router
+from backend.app.routes.rate_limits import router as rate_limits_router
+
+# Import all models to ensure they are registered in SQLAlchemy metadata
+from backend.app.models.user import User  # noqa: F401
+from backend.app.models.target_url import TargetURL  # noqa: F401
+from backend.app.models.screenshot import Screenshot  # noqa: F401
+from backend.app.models.prediction import Prediction  # noqa: F401
+from backend.app.models.log import Log  # noqa: F401
+from backend.app.models.rate_limit import RateLimit  # noqa: F401
 
 # Set up logging configuration
 logging.basicConfig(
@@ -60,7 +75,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Aether Analytics — AI Graph Analysis Platform",
-    description="Asynchronous Python FastAPI stock graph vision pipeline.",
+    description="Asynchronous Python FastAPI website monitoring pipeline.",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -74,15 +89,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Mount predictions CRUD routes
+# Register routers
+app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(target_url_router, prefix="/api/target-url", tags=["Target URL"])
+app.include_router(monitoring_router, prefix="/api/monitoring", tags=["Monitoring Control"])
 app.include_router(predictions_router, prefix="/api/predictions", tags=["Predictions"])
 app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
-app.include_router(assets_router, prefix="/api/assets", tags=["Assets"])
+app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(rate_limits_router, prefix="/api/rate-limit-stats", tags=["Rate Limits"])
 
 # Serve local screenshot files statically for dashboard fallback
 app.mount("/screenshots", StaticFiles(directory=str(config.SCREENSHOTS_DIR)), name="screenshots")
-
 
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):

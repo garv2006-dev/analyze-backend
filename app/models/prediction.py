@@ -1,57 +1,52 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, JSON
+from sqlalchemy import Column, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.sql import func
 from backend.app.database import Base
 
-class StockPrediction(Base):
-    __tablename__ = "stock_predictions"
+class Prediction(Base):
+    __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    stock_symbol = Column(String(50), nullable=False, index=True)
-    captured_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-    image_path = Column(String(255), nullable=False)
-    trend_direction = Column(String(20), nullable=False) # BULLISH, BEARISH, SIDEWAYS
+    screenshot_id = Column(Integer, ForeignKey("screenshots.id", ondelete="CASCADE"), nullable=False, index=True)
+    ai_result = Column(JSON, nullable=False) # JSON details containing supports, resistances, summaries, sentiment
     confidence_score = Column(Integer, nullable=False)
-    support_levels = Column(JSON, nullable=False) # JSON array of floats e.g. [23650, 23620]
-    resistance_levels = Column(JSON, nullable=False) # JSON array of floats e.g. [23780, 23820]
-    prediction_json = Column(JSON, nullable=False) # Dictionary detailing forecast intervals & indicators
-    ai_summary = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
-    def to_dict(self):
+    def to_dict(self, screenshot_path=None, highlighted_path=None):
         """Converts SQLAlchemy model to a serializable dictionary, maintaining backward compatibility for legacy frontend properties."""
+        ai_res = self.ai_result or {}
         
-        # Determine the first support/resistance level for legacy support
+        support_levels = ai_res.get("support_levels", [])
+        resistance_levels = ai_res.get("resistance_levels", [])
+        
         legacy_support = 0.0
         legacy_resistance = 0.0
-        if isinstance(self.support_levels, list) and len(self.support_levels) > 0:
-            legacy_support = float(self.support_levels[0])
-        elif isinstance(self.support_levels, (int, float)):
-            legacy_support = float(self.support_levels)
+        if isinstance(support_levels, list) and len(support_levels) > 0:
+            legacy_support = float(support_levels[0])
+        if isinstance(resistance_levels, list) and len(resistance_levels) > 0:
+            legacy_resistance = float(resistance_levels[0])
             
-        if isinstance(self.resistance_levels, list) and len(self.resistance_levels) > 0:
-            legacy_resistance = float(self.resistance_levels[0])
-        elif isinstance(self.resistance_levels, (int, float)):
-            legacy_resistance = float(self.resistance_levels)
-
-        # Reconstruct extracted metrics & forecast results for legacy UI components
-        indicators = self.prediction_json.get("indicators", {}) if isinstance(self.prediction_json, dict) else {}
-        current_value = self.prediction_json.get("current_value", legacy_support * 1.01) # sensible default
+        current_value = ai_res.get("current_value", legacy_support * 1.01)
+        indicators = ai_res.get("indicators", {})
         
-        # Build backward-compatible JSON structure
+        img_path = screenshot_path or ""
+        img_url = img_path if (img_path and (img_path.startswith("http://") or img_path.startswith("https://"))) else (f"/screenshots/{img_path}" if img_path else "")
+        
+        highlight_url = highlighted_path if (highlighted_path and (highlighted_path.startswith("http://") or highlighted_path.startswith("https://"))) else (f"/screenshots/{highlighted_path}" if highlighted_path else None)
+
         return {
             "id": self.id,
-            "stock_symbol": self.stock_symbol,
-            "captured_at": self.captured_at.isoformat() if self.captured_at else None,
-            "image_path": self.image_path,
-            "image_url": self.image_path if (self.image_path and (self.image_path.startswith("http://") or self.image_path.startswith("https://"))) else f"/screenshots/{self.image_path}",
-
-            "trend_direction": self.trend_direction,
+            "stock_symbol": "TARGET",
+            "captured_at": self.timestamp.isoformat() if self.timestamp else None,
+            "image_path": img_path,
+            "image_url": img_url,
+            "highlighted_image_url": highlight_url,
+            "trend_direction": ai_res.get("trend_direction", "SIDEWAYS").upper(),
             "confidence_score": self.confidence_score,
-            "support_levels": self.support_levels,
-            "resistance_levels": self.resistance_levels,
-            "prediction_json": self.prediction_json,
-            "ai_summary": self.ai_summary,
-            "is_mock": self.prediction_json.get("is_mock", False) if isinstance(self.prediction_json, dict) else False,
-
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels,
+            "prediction_json": ai_res,
+            "ai_summary": ai_res.get("ai_summary", ""),
+            "is_mock": ai_res.get("is_mock", False),
             
             # Legacy structures for existing frontend components:
             "extracted_metrics": {
@@ -64,8 +59,8 @@ class StockPrediction(Base):
                 }
             },
             "forecast_results": {
-                "forecast_trend": self.trend_direction.lower(),
+                "forecast_trend": ai_res.get("trend_direction", "SIDEWAYS").lower(),
                 "confidence_score": self.confidence_score,
-                "prediction_summary": self.ai_summary
+                "prediction_summary": ai_res.get("ai_summary", "")
             }
         }

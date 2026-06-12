@@ -5,7 +5,7 @@ from sqlalchemy.future import select
 from pydantic import BaseModel
 from typing import List, Optional
 from backend.app.database import get_db
-from backend.app.models.prediction import StockPrediction
+from backend.app.models.prediction import Prediction
 from backend.app.services.ai import async_client, gemini_client, types
 from backend.app import config
 
@@ -98,13 +98,13 @@ async def chat_with_ai(request: ChatRequest, db: AsyncSession = Depends(get_db))
         # 1. Fetch prediction context from DB
         prediction = None
         if request.prediction_id:
-            query = select(StockPrediction).where(StockPrediction.id == request.prediction_id)
+            query = select(Prediction).where(Prediction.id == request.prediction_id)
             result = await db.execute(query)
             prediction = result.scalars().first()
         
         if not prediction:
             # Fallback to the latest prediction if no ID was provided or requested ID not found
-            query = select(StockPrediction).order_by(StockPrediction.captured_at.desc()).limit(1)
+            query = select(Prediction).order_by(Prediction.timestamp.desc()).limit(1)
             result = await db.execute(query)
             prediction = result.scalars().first()
 
