@@ -1,12 +1,49 @@
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
+
+# Prevent Playwright screenshots from hanging/timing out while waiting for fonts to load
+os.environ["PW_TEST_SCREENSHOT_NO_FONTS_READY"] = "1"
+
 from playwright.async_api import async_playwright
 from backend.app import config
 
 logger = logging.getLogger("Browser")
 logger.setLevel(logging.INFO)
+
+def _is_image_blank(image_path: Path) -> bool:
+    """
+    Checks if the screenshot is blank/single-color (mostly pure white).
+    Returns True if the image is blank, False otherwise.
+    """
+    try:
+        from PIL import Image
+        if not image_path.exists():
+            return True
+        with Image.open(image_path) as img:
+            rgb_img = img.convert("RGB")
+            colors = rgb_img.getcolors(maxcolors=2)
+            if colors and len(colors) <= 1:
+                return True
+                
+            # Convert to Grayscale to count pixels matching white background
+            gray_img = img.convert("L")
+            extrema = gray_img.getextrema()
+            if extrema and extrema[0] == extrema[1]:
+                return True
+                
+            # Histogram check: if 99.9% of pixels are white (>= 250 brightness)
+            hist = gray_img.histogram()
+            total_pixels = gray_img.width * gray_img.height
+            if total_pixels > 0:
+                white_pixels = sum(hist[250:])
+                if (white_pixels / total_pixels) > 0.999:
+                    return True
+    except Exception as e:
+        logger.warning(f"Failed to check screenshot blankness: {e}")
+    return False
 
 def _sync_capture_chart(target_url: str = None, stock_symbol: str = None) -> dict:
     """Synchronous worker that executes the async playwright capture inside a ProactorEventLoop."""
@@ -40,15 +77,19 @@ async def capture_chart(target_url: str = None, stock_symbol: str = None) -> dic
         return await _async_capture_chart_impl(target_url, stock_symbol)
 
 async def _async_capture_chart_impl(target_url: str = None, stock_symbol: str = None) -> dict:
-
     """
     Launches headless Chromium to capture a clean screenshot of the stock index graph.
     Injects DOM operations to remove common overlays, ads, modals, headers, and sidebars.
+    If the screenshot is blank/white, it reloads the page and retries up to 3 times
+    with progressive wait delays.
     
     Returns:
         dict: Containing 'filename' and 'absolute_path'
     """
     logger.info("🌐 Initializing Playwright browser automation pipeline...")
+    
+    max_attempts = 3
+    attempt = 1
     
     async with async_playwright() as p:
         browser = None
@@ -64,225 +105,246 @@ async def _async_capture_chart_impl(target_url: str = None, stock_symbol: str = 
                 ]
             )
             
-            # Create isolated browser context
+            # Create isolated browser context with custom user agent to avoid bot-detection empty pages
             context = await browser.new_context(
                 viewport={"width": 1280, "height": 800},
-                device_scale_factor=1
+                device_scale_factor=1,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             
             page = await context.new_page()
             
+            # Font blocking route removed as it triggers blank screenshots in headless mode
+
+            
             url_to_capture = target_url if target_url else config.TARGET_URL
-            logger.info(f"🔗 Navigating to target stock URL: {url_to_capture}")
-            try:
-                await page.goto(url_to_capture, wait_until="domcontentloaded", timeout=20000)
-                logger.info("✔️ Page load completed successfully (domcontentloaded).")
-            except Exception as goto_err:
-                logger.warning(f"⚠️ page.goto timed out or failed: {goto_err}. Attempting to proceed...")
-
-            # Guarantee body element exists before running DOM operations
-            try:
-                await page.wait_for_selector("body", timeout=10000)
-            except Exception as body_err:
-                logger.warning(f"⚠️ Body element check timed out: {body_err}")
-
-
             
-            # Allow time for initial rendering
-            logger.info(f"⏱ Waiting {config.RENDER_DELAY_MS}ms for chart animation frames...")
-            await page.wait_for_timeout(config.RENDER_DELAY_MS)
-            
-            # Inject JavaScript to clean the screen (modals, popups, overlays, navbars, sidebars, ads)
-            logger.info("🧹 Cleaning page DOM: Removing banners, login/signup modals, navbars and overlays...")
-            await page.evaluate("""
-                () => {
-                    // 1. Detect and close standard modal dialogs
-                    const closeSelectors = [
-                        '.close-button', '.close-btn', '.close', '[aria-label="close"]', 
-                        '[aria-label="Close"]', '.modal-close', '.popup-close', '.modal__close'
-                    ];
-                    
-                    for (const sel of closeSelectors) {
-                        try {
-                            const btn = document.querySelector(sel);
-                            if (btn && typeof btn.click === 'function') {
-                                btn.click();
-                                console.log('Dismissed modal via click:', sel);
-                            }
-                        } catch (e) {}
-                    }
-                    
-                    // 2. Hide intrusive overlay/modal containers and ads
-                    const hideSelectors = [
-                        '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]', '[class*="dialog"]',
-                        '[id*="modal"]', '[id*="popup"]', '[id*="overlay"]', '[id*="dialog"]',
-                        '.login-modal', '.signup-modal', '.modal-backdrop', '.fade.show',
-                        'header', 'footer', 'nav', 'aside', '.sidebar', '#sidebar', '.header', '.footer', '.navbar',
-                        '[class*="header"]', '[class*="footer"]', '[class*="navbar"]', '[class*="sidebar"]', 
-                        '[class*="menu"]', '[class*="ad-"]', '[class*="ads-"]', '[id*="ad-"]', '[id*="ads-"]', 
-                        '.ad-box', '.ad-container', '[class*="rodal"]'
-                    ];
-                    
-                    document.querySelectorAll(hideSelectors.join(',')).forEach(el => {
-                        try {
-                            if (el && el.style) {
-                                el.style.display = 'none';
-                                el.style.opacity = '0';
-                                el.style.pointerEvents = 'none';
-                            }
-                        } catch(e) {}
-                    });
-                    
-                    // 3. Fix body overflow to allow normal screen rendering
-                    document.body.style.overflow = 'auto';
-                    document.documentElement.style.overflow = 'auto';
-                }
-            """)
-            
-            # Post DOM cleanup render buffer
-            await page.wait_for_timeout(1000)
-            
-            # Delegate precise price extraction to the AI Vision model instead of error-prone DOM scraping
-            logger.info("🔍 Delegating live price extraction to AI Vision model for perfect screenshot sync...")
+            filename = None
+            absolute_path = None
             extracted_price = None
             
-            timestamp = int(time.time() * 1000)
-            filename = f"graph_{timestamp}.png"
-            absolute_path = config.SCREENSHOTS_DIR / filename
-            
-            # Attempt clean high-res TradingView canvas download after switching to 5-minute interval
-            downloaded_successfully = False
-            
-            try:
-                logger.info("🔍 Locating TradingView chart iframe...")
-                chart_frame = None
-                for frame in page.frames:
-                    if "tradingview" in frame.name or "tradingview" in frame.url:
-                        chart_frame = frame
+            while attempt <= max_attempts:
+                logger.info(f"🔄 [Attempt {attempt}/{max_attempts}] Navigating to target stock URL: {url_to_capture}")
+                try:
+                    if attempt > 1:
+                        logger.info("Refreshing the page to recover from blank render...")
+                        await page.reload(wait_until="domcontentloaded", timeout=20000)
+                    else:
+                        await page.goto(url_to_capture, wait_until="domcontentloaded", timeout=20000)
+                    logger.info("✔️ Page load completed successfully (domcontentloaded).")
+                except Exception as goto_err:
+                    logger.warning(f"⚠️ page.goto/reload timed out or failed: {goto_err}. Attempting to proceed...")
+
+                # Guarantee body element exists before running DOM operations
+                try:
+                    await page.wait_for_selector("body", state="attached", timeout=10000)
+                except Exception as body_err:
+                    logger.warning(f"⚠️ Body element check timed out: {body_err}")
+
+                # Progressive render wait loop on the SAME page load
+                # This gives the React bundle/Chart library time to fetch data and render, 
+                # avoiding expensive page reloads if it is just a slow network/API response.
+                check_loop = 1
+                max_checks = 3
+                captured_valid = False
+                
+                while check_loop <= max_checks:
+                    # Determine wait time: check 1 (2s), check 2 (4s), check 3 (8s)
+                    wait_time = config.RENDER_DELAY_MS * (2 ** (check_loop - 1))
+                    logger.info(f"⏱ [Check {check_loop}/{max_checks}] Waiting {wait_time}ms for chart animation frames to render...")
+                    await page.wait_for_timeout(wait_time)
+                    
+                    # Inject JavaScript to clean the screen (modals, popups, overlays, navbars, sidebars, ads)
+                    logger.info("🧹 Cleaning page DOM: Removing banners, login/signup modals, navbars and overlays...")
+                    await page.evaluate("""
+                        () => {
+                            // 1. Detect and close standard modal dialogs
+                            const closeSelectors = [
+                                '.close-button', '.close-btn', '.close', '[aria-label="close"]', 
+                                '[aria-label="Close"]', '.modal-close', '.popup-close', '.modal__close'
+                            ];
+                            for (const sel of closeSelectors) {
+                                try {
+                                    const btn = document.querySelector(sel);
+                                    if (btn && typeof btn.click === 'function') {
+                                        btn.click();
+                                    }
+                                } catch (e) {}
+                            }
+                            
+                            // 2. Hide intrusive overlay/modal containers and ads safely
+                            const hideSelectors = [
+                                'header', 'footer', 'nav', 'aside', 
+                                '#header', '.header', '#footer', '.footer', '#navbar', '.navbar', '#sidebar', '.sidebar',
+                                '.login-modal', '.signup-modal', '.modal-backdrop', '.fade.show',
+                                '.ad-box', '.ad-container', '[class*="rodal"]',
+                                '[class*="ad-"]', '[class*="ads-"]', '[id*="ad-"]', '[id*="ads-"]'
+                            ];
+                            
+                            document.querySelectorAll(hideSelectors.join(',')).forEach(el => {
+                                try {
+                                    if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML' && el.style) {
+                                        el.style.display = 'none';
+                                        el.style.opacity = '0';
+                                        el.style.pointerEvents = 'none';
+                                    }
+                                } catch(e) {}
+                            });
+                            
+                            // 3. Fix body overflow to allow normal screen rendering
+                            document.body.style.overflow = 'auto';
+                            document.documentElement.style.overflow = 'auto';
+                        }
+                    """)
+                    
+                    # Post DOM cleanup render buffer
+                    await page.wait_for_timeout(1000)
+                    
+                    timestamp = int(time.time() * 1000)
+                    filename = f"graph_{timestamp}.png"
+                    absolute_path = config.SCREENSHOTS_DIR / filename
+                    
+                    # Attempt clean high-res TradingView canvas download after switching to 5-minute interval
+                    downloaded_successfully = False
+                    
+                    try:
+                        logger.info("🔍 Locating TradingView chart iframe...")
+                        chart_frame = None
+                        for frame in page.frames:
+                            if "tradingview" in frame.name or "tradingview" in frame.url:
+                                chart_frame = frame
+                                break
+                        
+                        if chart_frame:
+                            logger.info(f"✔️ Found TradingView iframe: '{chart_frame.name}'")
+                            
+                            try:
+                                # Switch to 5m interval
+                                logger.info("⏱ Locating '5m' button to set 5-minute candlestick chart interval...")
+                                five_m_loc = chart_frame.locator("text='5m'")
+                                count = await five_m_loc.count()
+                                clicked_5m = False
+                                for i in range(count):
+                                    el = five_m_loc.nth(i)
+                                    try:
+                                        if await el.is_visible():
+                                            await el.click(timeout=2000)
+                                            clicked_5m = True
+                                            break
+                                    except Exception:
+                                        pass
+                                        
+                                if not clicked_5m:
+                                    try:
+                                        # Use .first to prevent strict mode violations (since multiple divs can match '5m')
+                                        await chart_frame.locator("div:text-is('5m')").first.click(timeout=2000)
+                                        clicked_5m = True
+                                    except Exception:
+                                        pass
+                                        
+                                if clicked_5m:
+                                    logger.info("✔️ Successfully set chart interval to 5m.")
+                                else:
+                                    logger.info("ℹ️ 5m button click bypassed (already active or hidden).")
+                            except Exception as tv_interval_err:
+                                logger.info(f"ℹ️ 5m button interval selection bypassed: {tv_interval_err}")
+                                    
+                            # Wait for 5m chart candles to render
+                            logger.info("⏱ Waiting 4000ms for 5-minute candlestick data to load...")
+                            await page.wait_for_timeout(4000)
+                            
+                            # Trigger direct chart download via the camera snapshot button
+                            logger.info("📸 Locating TradingView camera snapshot button (#header-toolbar-screenshot)...")
+                            camera_btn = chart_frame.locator("#header-toolbar-screenshot")
+                            if await camera_btn.count() > 0 and await camera_btn.first.is_visible():
+                                await camera_btn.first.click()
+                                await page.wait_for_timeout(1000)
+                                
+                                download_option = chart_frame.locator("text='Download image'")
+                                if await download_option.count() > 0 and await download_option.first.is_visible():
+                                    async with page.expect_download(timeout=15000) as download_info:
+                                        await download_option.first.click()
+                                    download = await download_info.value
+                                    await download.save_as(str(absolute_path))
+                                    downloaded_successfully = True
+                    except Exception as tv_err:
+                        logger.warning(f"⚠️ Error during TradingView frame interaction: {tv_err}")
+                        
+                    # Fallback to standard page screenshot if TradingView download failed
+                    if not downloaded_successfully:
+                        logger.info("⚠️ Direct download failed. Falling back to screenshot capture method...")
+                        
+                        # Determine elements to crop screenshot to
+                        logger.info("📸 Evaluating graph canvas boundaries...")
+                        
+                        has_custom_selector = config.TARGET_SELECTOR and config.TARGET_SELECTOR != "body"
+                        target_locator = None
+                        
+                        if has_custom_selector:
+                            try:
+                                locator = page.locator(config.TARGET_SELECTOR).first
+                                if await locator.is_visible():
+                                    target_locator = locator
+                            except Exception:
+                                pass
+                        
+                        # Scan for standard chart canvases
+                        if not target_locator:
+                            try:
+                                tv_selector = ".tv-lightweight-charts, canvas, .chart-container, #chart-container"
+                                locators = page.locator(tv_selector)
+                                count = await locators.count()
+                                
+                                if count > 0:
+                                    max_area = 0
+                                    best_locator = None
+                                    for i in range(count):
+                                        loc = locators.nth(i)
+                                        if await loc.is_visible():
+                                            box = await loc.bounding_box()
+                                            if box:
+                                                area = box["width"] * box["height"]
+                                                if area > max_area:
+                                                    max_area = area
+                                                    best_locator = loc
+                                                    
+                                    if best_locator and max_area > 10000:
+                                        target_locator = best_locator
+                            except Exception:
+                                pass
+                        
+                        # Screenshot taking
+                        if target_locator:
+                            try:
+                                await target_locator.screenshot(path=str(absolute_path), timeout=15000)
+                                logger.info(f"✔️ Precision chart screenshot captured: {absolute_path}")
+                            except Exception:
+                                await page.screenshot(path=str(absolute_path), timeout=15000)
+                        else:
+                            await page.screenshot(path=str(absolute_path), full_page=True, timeout=15000)
+                    
+                    # Verify screenshot blankness/white screen
+                    if _is_image_blank(absolute_path):
+                        logger.warning(f"⚠️ Screenshot {filename} is blank/white. Deleting file...")
+                        try:
+                            absolute_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        # Move to next check loop on same page
+                        check_loop += 1
+                    else:
+                        logger.info(f"✔️ Valid screenshot captured on check {check_loop} of attempt {attempt}.")
+                        captured_valid = True
                         break
                 
-                if chart_frame:
-                    logger.info(f"✔️ Found TradingView iframe: '{chart_frame.name}'")
-                    
-                    # 1. Switch to 5m interval
-                    logger.info("⏱ Locating '5m' button to set 5-minute candlestick chart interval...")
-                    five_m_loc = chart_frame.locator("text='5m'")
-                    count = await five_m_loc.count()
-                    clicked_5m = False
-                    for i in range(count):
-                        el = five_m_loc.nth(i)
-                        if await el.is_visible():
-                            logger.info(f"Clicking visible 5m button at index {i}...")
-                            await el.click()
-                            clicked_5m = True
-                            break
-                            
-                    if not clicked_5m:
-                        try:
-                            await chart_frame.locator("div:text-is('5m')").click()
-                            logger.info("Clicking 5m button via div text matching...")
-                            clicked_5m = True
-                        except Exception:
-                            logger.warning("Could not click 5m button automatically.")
-                            
-                    # Wait for 5m chart candles to render
-                    logger.info("⏱ Waiting 4000ms for 5-minute candlestick data to load...")
-                    await page.wait_for_timeout(4000)
-                    
-                    # 2. Trigger direct chart download via the camera snapshot button
-                    logger.info("📸 Locating TradingView camera snapshot button (#header-toolbar-screenshot)...")
-                    camera_btn = chart_frame.locator("#header-toolbar-screenshot")
-                    if await camera_btn.count() > 0 and await camera_btn.first.is_visible():
-                        logger.info("Clicking snapshot camera icon to open download menu...")
-                        await camera_btn.first.click()
-                        await page.wait_for_timeout(1000) # wait for popover menu to render
-                        
-                        logger.info("Locating 'Download image' option in snapshot menu...")
-                        download_option = chart_frame.locator("text='Download image'")
-                        if await download_option.count() > 0 and await download_option.first.is_visible():
-                            logger.info("Executing clean chart canvas download via browser interception...")
-                            async with page.expect_download(timeout=15000) as download_info:
-                                await download_option.first.click()
-                            download = await download_info.value
-                            await download.save_as(str(absolute_path))
-                            logger.info(f"✔️ Clean high-resolution 5-minute chart image successfully downloaded: {absolute_path}")
-                            downloaded_successfully = True
-                        else:
-                            logger.warning("'Download image' option not found or visible inside screenshot menu.")
-                    else:
-                        logger.warning("TradingView camera snapshot button not visible.")
+                if captured_valid:
+                    break
                 else:
-                    logger.warning("TradingView iframe not found.")
-            except Exception as tv_err:
-                logger.error(f"⚠️ Error during TradingView frame interaction: {tv_err}")
-                
-            # Fallback to standard page screenshot if TradingView download failed
-            if not downloaded_successfully:
-                logger.info("⚠️ Direct download failed. Falling back to screenshot capture method...")
-                
-                # Determine elements to crop screenshot to
-                # We want ONLY the graph, so let's try to find target_selector or the largest canvas
-                logger.info("📸 Evaluating graph canvas boundaries...")
-                
-                # First, check if custom selector exists and is not body
-                has_custom_selector = config.TARGET_SELECTOR and config.TARGET_SELECTOR != "body"
-                
-                bounding_box = None
-                target_locator = None
-                
-                if has_custom_selector:
-                    try:
-                        logger.info(f"Targeting specified selector: {config.TARGET_SELECTOR}")
-                        locator = page.locator(config.TARGET_SELECTOR).first
-                        if await locator.is_visible():
-                            target_locator = locator
-                    except Exception as e:
-                        logger.warning(f"Failed resolving selector locator: {e}")
-                
-                # If no target locator yet, let's scan for standard chart canvases (TradingView lightweight charts, etc.)
-                if not target_locator:
-                    try:
-                        # Let's see if we have canvas elements or TV lightweight classes
-                        tv_selector = ".tv-lightweight-charts, canvas, .chart-container, #chart-container"
-                        locators = page.locator(tv_selector)
-                        count = await locators.count()
-                        
-                        if count > 0:
-                            logger.info(f"Found {count} candidate chart/canvas element(s). Locating main canvas...")
-                            # Pick the one with the largest area to capture
-                            max_area = 0
-                            best_locator = None
-                            
-                            for i in range(count):
-                                loc = locators.nth(i)
-                                if await loc.is_visible():
-                                    box = await loc.bounding_box()
-                                    if box:
-                                        area = box["width"] * box["height"]
-                                        if area > max_area:
-                                            max_area = area
-                                            best_locator = loc
-                                            
-                            if best_locator and max_area > 10000: # reasonable size threshold
-                                target_locator = best_locator
-                                logger.info(f"Found largest chart canvas with area {max_area}px.")
-                    except Exception as e:
-                        logger.warning(f"Error scanning for largest canvas: {e}")
-                
-                # Screenshot taking
-                if target_locator:
-                    try:
-                        logger.info("Taking precision cropped screenshot of the chart container...")
-                        await target_locator.screenshot(path=str(absolute_path))
-                        logger.info(f"✔️ Precision chart screenshot captured and saved: {absolute_path}")
-                    except Exception as locator_err:
-                        logger.warning(f"Failed precision locator screenshot: {locator_err}. Falling back to page screenshot.")
-                        await page.screenshot(path=str(absolute_path))
-                        logger.info(f"✔️ Fallback page viewport screenshot captured: {absolute_path}")
-                else:
-                    logger.info("No explicit chart canvas found. Taking full-page screenshot.")
-                    await page.screenshot(path=str(absolute_path), full_page=True)
-                    logger.info(f"✔️ Full page screenshot captured and saved: {absolute_path}")
+                    logger.warning(f"⚠️ Page stayed blank after {max_checks} rendering wait cycles on attempt {attempt}. Triggering page reload...")
+                    attempt += 1
+            
+            if attempt > max_attempts:
+                raise RuntimeError(f"Failed to capture non-blank screenshot after {max_attempts} attempts.")
                 
             # Prune old screenshots to prevent disk leak
             await prune_old_screenshots()
