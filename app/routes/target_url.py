@@ -18,6 +18,7 @@ router = APIRouter()
 
 class TargetURLRequest(BaseModel):
     url: str = Field(..., max_length=1024)
+    interval_minutes: int = Field(5, ge=1, le=1440)
 
 def validate_url(url: str) -> bool:
     """Validates that a URL string is formatted correctly and begins with http:// or https://."""
@@ -60,6 +61,7 @@ async def create_target_url(body: TargetURLRequest, current_user: User = Depends
         new_target = TargetURL(
             user_id=current_user.id,
             url=url,
+            interval_minutes=body.interval_minutes,
             status="inactive" # Start as inactive; user must click "Start Monitoring" to enable it
         )
         db.add(new_target)

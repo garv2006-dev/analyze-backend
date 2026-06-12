@@ -182,6 +182,32 @@ async def run_pipeline_cycle():
                 res = await session.execute(select(TargetURL).where(TargetURL.id == target.id))
                 fresh_target = res.scalars().first()
                 if fresh_target and fresh_target.status == "active":
+                    # Check if enough time has elapsed since the last screenshot of this target
+                    prev_query = select(Screenshot).where(
+                        Screenshot.url_id == fresh_target.id
+                    ).order_by(Screenshot.timestamp.desc()).limit(1)
+                    prev_res = await session.execute(prev_query)
+                    last_screenshot = prev_res.scalars().first()
+                    
+                    if last_screenshot:
+                        from datetime import datetime, timezone
+                        ts = last_screenshot.timestamp
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        
+                        now = datetime.now(timezone.utc)
+                        elapsed_seconds = (now - ts).total_seconds()
+                        elapsed_minutes = elapsed_seconds / 60.0
+                        
+                        # Use a small safety margin (e.g. 5 seconds) to avoid timing jitter issues
+                        safety_margin_minutes = 5.0 / 60.0
+                        if (elapsed_minutes + safety_margin_minutes) < fresh_target.interval_minutes:
+                            logger.info(
+                                f"⏸️ [SCHEDULER] Skipping target {fresh_target.id} ({fresh_target.url}): "
+                                f"only {elapsed_minutes:.2f} mins elapsed since last capture (interval: {fresh_target.interval_minutes} mins)."
+                            )
+                            continue
+                    
                     await execute_user_monitoring_cycle(session, fresh_target)
             except Exception as loop_err:
                 logger.error(f"Error executing task for Target ID {target.id}: {loop_err}")

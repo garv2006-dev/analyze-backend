@@ -9,6 +9,7 @@ class TargetURL(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     url = Column(String(1024), nullable=False)
     status = Column(String(50), default="inactive", nullable=False) # "active", "inactive"
+    interval_minutes = Column(Integer, default=5, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -18,6 +19,7 @@ class TargetURL(Base):
             "user_id": self.user_id,
             "url": self.url,
             "status": self.status,
+            "interval_minutes": self.interval_minutes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

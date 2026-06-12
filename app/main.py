@@ -62,6 +62,16 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     logger.info("✔️ Database tables verified.")
     
+    # 2b. Safe Column Migration: Ensure 'interval_minutes' column exists on 'target_urls'
+    logger.info("⚙️ Checking target_urls table schema for interval_minutes column...")
+    async with database.engine.begin() as conn:
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE target_urls ADD COLUMN interval_minutes INTEGER DEFAULT 5 NOT NULL"))
+            logger.info("✔️ Added missing 'interval_minutes' column to 'target_urls' table.")
+        except Exception as migration_err:
+            logger.info(f"ℹ️ Migration skipped (column 'interval_minutes' likely already exists): {migration_err}")
+    
     # 3. Start the APScheduler automated pipeline engine
     start_scheduler()
     
