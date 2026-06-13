@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.sql import func
 from backend.app.database import Base
+from backend.app.config import BACKEND_URL
 
 class Prediction(Base):
     __tablename__ = "predictions"
@@ -29,9 +30,9 @@ class Prediction(Base):
         indicators = ai_res.get("indicators", {})
         
         img_path = screenshot_path or ""
-        img_url = img_path if (img_path and (img_path.startswith("http://") or img_path.startswith("https://"))) else (f"/screenshots/{img_path}" if img_path else "")
+        img_url = img_path if (img_path and (img_path.startswith("http://") or img_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{img_path}" if img_path else "")
         
-        highlight_url = highlighted_path if (highlighted_path and (highlighted_path.startswith("http://") or highlighted_path.startswith("https://"))) else (f"/screenshots/{highlighted_path}" if highlighted_path else None)
+        highlight_url = highlighted_path if (highlighted_path and (highlighted_path.startswith("http://") or highlighted_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{highlighted_path}" if highlighted_path else None)
 
         return {
             "id": self.id,
