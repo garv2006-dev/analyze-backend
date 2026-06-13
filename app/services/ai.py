@@ -112,7 +112,7 @@ def clean_and_parse_json(s: str) -> dict:
         logger.error(f"Failed to parse JSON even after cleaning. Error: {decode_err}\\nRaw Content:\\n{original}\\nCleaned String:\\n{s}")
         raise
 
-async def analyze_chart(absolute_image_path: str, extracted_price: float = None) -> dict:
+async def analyze_chart(absolute_image_path: str, extracted_price: float = None, target_url: str = None) -> dict:
     """
     Sends the graph screenshot to OpenAI Vision API for deep market analysis.
     Falls back to synthetic mock data generator if API key is invalid/missing.
@@ -120,13 +120,14 @@ async def analyze_chart(absolute_image_path: str, extracted_price: float = None)
     Args:
         absolute_image_path (str): The absolute filesystem path of the PNG image.
         extracted_price (float): Dynamic real-time price extracted from page DOM.
+        target_url (str): The target webpage URL.
         
     Returns:
         dict: Containing trend_direction, confidence_score, support_levels, resistance_levels, prediction_json, ai_summary
     """
     if config.IS_MOCK_MODE:
         logger.info(f"🧠 [MOCK MODE] Simulating stock vision analysis for: {absolute_image_path}")
-        return simulate_vision_analysis(extracted_price=extracted_price)
+        return simulate_vision_analysis(extracted_price=extracted_price, target_url=target_url)
         
     prompt = """You are a highly experienced Senior Quantitative Chart Analyst, Day Trader, and Financial Engineer.
 Analyze the provided screenshot of the stock index/asset chart with absolute technical accuracy to extract structured market intelligence and highly precise trend predictions.
@@ -141,10 +142,12 @@ Analyze the provided screenshot of the stock index/asset chart with absolute tec
    - Calculate a logical **entry_price** based on breakouts or pullbacks.
    - Set a protective **stop_loss** level (below support for bullish trades, above resistance for bearish trades).
    - Set a realistic **target_price** (take-profit near resistance for bullish trades, near support for bearish trades).
-7. **No Placeholder Bias**: Do NOT repeat the example values below. Perform actual visual measurements on the unique chart provided!
+7. **Chart Validation**: Identify if this image represents a financial stock, index, or asset price chart (typically featuring candlesticks or line graphs showing price trends over time). Set "is_stock_market_chart" to true ONLY if it is a stock or financial market chart. Set it to false if the image represents anything else (e.g. general websites, other types of diagrams, text pages, etc.).
+8. **No Placeholder Bias**: Do NOT repeat the example values below. Perform actual visual measurements on the unique chart provided!
 
 Your output must be a clean, valid JSON object following EXACTLY this schema structure:
 {
+  "is_stock_market_chart": true, // Must be true ONLY if the image represents a financial stock/index/asset chart, and false otherwise
   "trend_direction": "BULLISH", // Must be exactly one of: "BULLISH", "BEARISH", "SIDEWAYS"
   "market_sentiment": "POSITIVE", // Must be exactly one of: "POSITIVE", "NEGATIVE", "NEUTRAL"
   "confidence_score": 92, // Percentage confidence from 0 to 100 based on pattern clarity
@@ -279,14 +282,18 @@ Ensure it is a valid, parseable JSON block."""
             
         logger.info(f"✔️ Live Price visually extracted by AI from screenshot: ₹{current_value}")
             
+        is_stock_chart = parsed_data.get("is_stock_market_chart", True)
+        
         # Re-map parsed structure into table-friendly layout
         return {
+            "is_stock_market_chart": bool(is_stock_chart),
             "trend_direction": parsed_data["trend_direction"].upper(),
             "confidence_score": int(parsed_data["confidence_score"]),
             "support_levels": parsed_data["support_levels"],
             "resistance_levels": parsed_data["resistance_levels"],
             "ai_summary": parsed_data["summary"],
             "prediction_json": {
+                "is_stock_market_chart": bool(is_stock_chart),
                 "current_value": current_value,
                 "market_sentiment": parsed_data.get("market_sentiment", "NEUTRAL"),
                 "predictions": parsed_data.get("predictions", {}),
@@ -305,12 +312,38 @@ Ensure it is a valid, parseable JSON block."""
     except Exception as err:
         logger.error(f"❌ OpenAI Vision analysis failed: {err}")
         logger.warning("⚠️ Falling back to synthetic market simulator due to pipeline disruption.")
-        return simulate_vision_analysis(extracted_price=extracted_price)
+        return simulate_vision_analysis(extracted_price=extracted_price, target_url=target_url)
 
-def simulate_vision_analysis(extracted_price: float = None) -> dict:
+def simulate_vision_analysis(extracted_price: float = None, target_url: str = None) -> dict:
     """Generates highly realistic dynamic synthetic mock data representing a real stock index."""
     global last_mock_value
     
+    # URL keyword validation in mock mode
+    is_stock_chart = True
+    if target_url:
+        keywords = ["chart", "stock", "market", "nifty", "groww", "tradingview", "finance", "share", "index", "indices", "ticker", "yahoo", "graph"]
+        is_stock_chart = any(kw in target_url.lower() for kw in keywords)
+        
+    if not is_stock_chart:
+        return {
+            "is_stock_market_chart": False,
+            "trend_direction": "SIDEWAYS",
+            "confidence_score": 0,
+            "support_levels": [],
+            "resistance_levels": [],
+            "ai_summary": "Error: The provided URL/image does not represent a valid stock market chart.",
+            "prediction_json": {
+                "is_stock_market_chart": False,
+                "current_value": 0.0,
+                "market_sentiment": "NEUTRAL",
+                "predictions": {},
+                "indicators": {"rsi": 50, "macd_trend": "Neutral"},
+                "signal": "HOLD",
+                "technical_analysis": {},
+                "trade_setup": {}
+            }
+        }
+
     # Anchor the simulation directly to the extracted live price if available
     if extracted_price is not None:
         last_mock_value = float(extracted_price)
@@ -380,12 +413,14 @@ def simulate_vision_analysis(extracted_price: float = None) -> dict:
     confidence = random.randint(75, 95)
     
     return {
+        "is_stock_market_chart": True,
         "trend_direction": trend,
         "confidence_score": confidence,
         "support_levels": support_levels,
         "resistance_levels": resistance_levels,
         "ai_summary": summary,
         "prediction_json": {
+            "is_stock_market_chart": True,
             "current_value": last_mock_value,
             "market_sentiment": sentiment,
             "predictions": {
@@ -410,6 +445,5 @@ def simulate_vision_analysis(extracted_price: float = None) -> dict:
                 "target_price": r1 if trend == "BULLISH" else round(last_mock_value * 0.985, 2)
             },
             "is_mock": True
-
         }
     }

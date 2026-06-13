@@ -1,5 +1,6 @@
 import logging
 import re
+from pathlib import Path
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,7 @@ from backend.app.models.user import User
 from backend.app.models.target_url import TargetURL
 from backend.app.models.log import Log
 from backend.app.services.security import get_current_user
+from backend.app.services import browser, ai
 
 logger = logging.getLogger("TargetURLRoutes")
 logger.setLevel(logging.INFO)
@@ -55,6 +57,34 @@ async def create_target_url(body: TargetURLRequest, current_user: User = Depends
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You can configure only one target URL. Delete the existing one first to update."
         )
+
+    # 2b. Test capture and validate that the URL contains a valid stock market chart
+    capture_result = None
+    try:
+        logger.info(f"🔍 Validating new target URL: {url}")
+        capture_result = await browser.capture_chart(target_url=url, stock_symbol="VALIDATION")
+        if not capture_result or not capture_result.get("absolute_path"):
+            raise ValueError("Browser failed to capture a screenshot from the provided URL. Please verify that the URL is public, accessible, and contains a chart.")
+            
+        # Analyze captured screenshot to check if it represents a stock market chart
+        ai_res = await ai.analyze_chart(capture_result["absolute_path"], target_url=url)
+        
+        if not ai_res.get("is_stock_market_chart", True):
+            raise ValueError("The captured chart does not appear to be a stock market chart (e.g. it doesn't show stock price candlesticks or lines). Only stock market charts are allowed.")
+            
+    except Exception as validation_err:
+        logger.error(f"Validation failed for URL '{url}': {validation_err}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"URL Validation Failed: {str(validation_err)}"
+        )
+    finally:
+        # Clean up the validation test screenshot file to save space
+        if capture_result and capture_result.get("absolute_path"):
+            try:
+                Path(capture_result["absolute_path"]).unlink(missing_ok=True)
+            except Exception as unlink_err:
+                logger.warning(f"Failed to remove validation screenshot file: {unlink_err}")
         
     # 3. Create and save the new target URL
     try:

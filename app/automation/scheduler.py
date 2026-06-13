@@ -91,8 +91,17 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
         db.add(ai_log)
         await db.commit()
         
-        ai_analysis = await ai.analyze_chart(capture_result["absolute_path"], extracted_price=None)
+        ai_analysis = await ai.analyze_chart(capture_result["absolute_path"], extracted_price=None, target_url=target_url)
         
+        # Check if the chart is a valid stock market chart
+        if not ai_analysis.get("is_stock_market_chart", True):
+            # Clean up the invalid screenshot file
+            try:
+                Path(capture_result["absolute_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise ValueError("The captured image does not represent a valid stock market chart. Only stock market charts are allowed.")
+            
         # Merge prediction JSON values
         ai_result_payload = {
             "trend_direction": ai_analysis["trend_direction"],
@@ -135,6 +144,7 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
         return new_prediction
         
     except Exception as e:
+        await db.rollback()
         logger.error(f"Error in execution cycle for User {user_id}: {e}")
         fail_log = Log(
             user_id=user_id,
