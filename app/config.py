@@ -14,6 +14,7 @@ load_dotenv(dotenv_path=ENV_FILE)
 # Server Configuration
 PORT = int(os.getenv("PORT", 5000))
 ENV = os.getenv("NODE_ENV", "development")
+BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 
 # PostgreSQL Database Configuration
 DB_USER = os.getenv("DB_USER", "postgres")
@@ -23,10 +24,23 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", 5432))
 
 # Database connection URLs
-# asyncpg for FastAPI async requests
-ASYNC_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-# psycopg2 for migrations/sync check
-SYNC_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL:
+    # Render and other platforms often provide 'postgres://' which needs to be 'postgresql://' for SQLAlchemy
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    # Construct ASYNC_DATABASE_URL by inserting '+asyncpg'
+    if "postgresql+asyncpg://" not in DATABASE_URL:
+        ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        ASYNC_DATABASE_URL = DATABASE_URL
+    SYNC_DATABASE_URL = DATABASE_URL
+else:
+    # asyncpg for FastAPI async requests
+    ASYNC_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # psycopg2 for migrations/sync check
+    SYNC_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # AI Vision Credentials
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
