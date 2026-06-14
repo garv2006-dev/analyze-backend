@@ -24,8 +24,12 @@ def check_monitoring_hours() -> tuple[bool, str, str]:
     now = datetime.now(tz)
     current_time = now.time()
     
+    # Check if weekday (Monday=0 to Friday=4)
+    is_weekday = now.weekday() < 5
+    
     start_time = time(9, 15)
     end_time = time(15, 15)
     
-    is_valid = start_time <= current_time <= end_time
+    is_valid = is_weekday and (start_time <= current_time <= end_time)
     return is_valid, now.strftime("%I:%M %p"), tz_name
+

@@ -83,7 +83,7 @@ async def update_monitoring_status(
             
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Monitoring can only be started during working hours (09:15 AM - 03:15 PM {tz_name}). Current server time: {current_time_str}."
+                detail=f"Monitoring can only be started during working hours (09:15 AM - 03:15 PM, Monday to Friday {tz_name}). Current server time: {current_time_str}."
             )
             
     # Update status
