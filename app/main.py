@@ -66,11 +66,22 @@ async def lifespan(app: FastAPI):
     logger.info("⚙️ Checking target_urls table schema for interval_minutes column...")
     async with database.engine.begin() as conn:
         try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE target_urls ADD COLUMN interval_minutes INTEGER DEFAULT 5 NOT NULL"))
-            logger.info("✔️ Added missing 'interval_minutes' column to 'target_urls' table.")
+            from sqlalchemy import inspect, text
+            
+            def get_columns(sync_conn):
+                inspector = inspect(sync_conn)
+                return [col["name"] for col in inspector.get_columns("target_urls")]
+            
+            columns = await conn.run_sync(get_columns)
+            if "interval_minutes" not in columns:
+                await conn.execute(text("ALTER TABLE target_urls ADD COLUMN interval_minutes INTEGER DEFAULT 5 NOT NULL"))
+                logger.info("✔️ Added missing 'interval_minutes' column to 'target_urls' table.")
+            else:
+                logger.info("ℹ️ 'interval_minutes' column already exists on 'target_urls' table.")
         except Exception as migration_err:
-            logger.info(f"ℹ️ Migration skipped (column 'interval_minutes' likely already exists): {migration_err}")
+            # Clean logging of error to avoid multiline database dumps in logs
+            err_msg = str(migration_err).split("\n")[0]
+            logger.warning(f"⚠️ Safe migration check encountered an issue: {err_msg}")
     
     # 3. Start the APScheduler automated pipeline engine
     start_scheduler()
