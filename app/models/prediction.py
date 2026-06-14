@@ -34,10 +34,19 @@ class Prediction(Base):
         
         highlight_url = highlighted_path if (highlighted_path and (highlighted_path.startswith("http://") or highlighted_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{highlighted_path}" if highlighted_path else None)
 
+        ts = self.timestamp
+        if ts:
+            from datetime import timezone
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            captured_at_str = ts.isoformat()
+        else:
+            captured_at_str = None
+
         return {
             "id": self.id,
             "stock_symbol": stock_symbol or "TARGET",
-            "captured_at": self.timestamp.isoformat() if self.timestamp else None,
+            "captured_at": captured_at_str,
             "image_path": img_path,
             "image_url": img_url,
             "highlighted_image_url": highlight_url,

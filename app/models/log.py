@@ -12,10 +12,19 @@ class Log(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     def to_dict(self):
+        ts = self.timestamp
+        if ts:
+            from datetime import timezone
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            timestamp_str = ts.isoformat()
+        else:
+            timestamp_str = None
+
         return {
             "id": self.id,
             "user_id": self.user_id,
             "event_type": self.event_type,
             "message": self.message,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": timestamp_str,
         }

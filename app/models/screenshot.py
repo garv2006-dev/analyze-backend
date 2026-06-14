@@ -1,3 +1,4 @@
+from datetime import timezone
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from backend.app.database import Base
@@ -22,5 +23,5 @@ class Screenshot(Base):
             "image_url": self.image_path if (self.image_path and (self.image_path.startswith("http://") or self.image_path.startswith("https://"))) else f"{BACKEND_URL}/screenshots/{self.image_path}",
             "highlighted_image_path": self.highlighted_image_path,
             "highlighted_image_url": self.highlighted_image_path if (self.highlighted_image_path and (self.highlighted_image_path.startswith("http://") or self.highlighted_image_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{self.highlighted_image_path}" if self.highlighted_image_path else None),
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": (self.timestamp.replace(tzinfo=timezone.utc).isoformat() if self.timestamp.tzinfo is None else self.timestamp.isoformat()) if self.timestamp else None,
         }
