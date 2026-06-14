@@ -227,6 +227,35 @@ async def run_pipeline_cycle():
     # 1. Enforce schedule control working hours
     is_within_hours, current_time_str, tz_name = check_monitoring_hours()
     if not is_within_hours:
+        # Automatically deactivate active targets when trading hours end so they do not auto-resume next day
+        try:
+            async with database.SessionLocal() as db:
+                result = await db.execute(select(TargetURL).where(TargetURL.status == "active"))
+                active_targets = result.scalars().all()
+                if active_targets:
+                    logger.info(f"⏰ [SCHEDULER] Outside working hours ({current_time_str} {tz_name}). Deactivating {len(active_targets)} active target(s) for manual restart tomorrow.")
+                    for target in active_targets:
+                        target.status = "inactive"
+                        
+                        # Add a log event about automatic deactivation
+                        auto_stop_log = Log(
+                            user_id=target.user_id,
+                            event_type="MONITORING_STOP",
+                            message=f"Schedule automatically stopped at end of trading hours ({current_time_str} {tz_name})."
+                        )
+                        db.add(auto_stop_log)
+                        
+                        # Broadcast status update via websocket so UI updates immediately
+                        await ws_manager.broadcast({
+                            "success": True,
+                            "type": "MONITORING_STATUS_CHANGED",
+                            "user_id": target.user_id,
+                            "status": "inactive"
+                        })
+                    await db.commit()
+        except Exception as deact_err:
+            logger.error(f"Failed to automatically deactivate targets: {deact_err}")
+            
         logger.info(f"⏸️ Scheduler check bypassed: outside working hours (current time is {current_time_str} {tz_name}).")
         return
         

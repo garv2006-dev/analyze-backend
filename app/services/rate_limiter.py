@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -21,7 +21,7 @@ async def check_and_increment_rate_limit(db: AsyncSession, user_id: int) -> tupl
     Returns:
         (is_allowed, error_message)
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_minute_window = now.strftime("%Y-%m-%d %H:%M")
     current_hour_window = now.strftime("%Y-%m-%d %H")
     current_day_window = now.strftime("%Y-%m-%d")

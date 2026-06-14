@@ -1,7 +1,7 @@
 import re
 import logging
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, EmailStr, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -131,13 +131,35 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     email = body.email.strip().lower()
     password = body.password
     
-    # 1. Login rate limit attempt check (max 5 failures in 15 mins)
-    fifteen_mins_ago = datetime.utcnow() - timedelta(minutes=15)
-    failure_count_query = select(func.count(Log.id)).where(
+    # 1. Query user first to check if they exist and to reset the limit upon successful logs
+    user_result = await db.execute(select(User).where(User.email == email))
+    user = user_result.scalars().first()
+    
+    # Find timestamp of the last successful login or registration for this user
+    last_success_time = None
+    if user:
+        last_success_query = select(Log.timestamp).where(
+            Log.user_id == user.id,
+            Log.event_type.in_(["AUTH_LOGIN", "AUTH_REGISTER"])
+        ).order_by(Log.timestamp.desc()).limit(1)
+        last_success_res = await db.execute(last_success_query)
+        last_success_time = last_success_res.scalar()
+
+    # 2. Login rate limit attempt check (max 5 failures in 15 mins) using timezone-aware datetimes
+    fifteen_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+    
+    # Base filters for login failures
+    failure_filters = [
         Log.event_type == "AUTH_LOGIN_FAILED",
-        Log.message.like(f"%{email}%"),
+        Log.message == f"Failed login attempt for email '{email}'.",
         Log.timestamp >= fifteen_mins_ago
-    )
+    ]
+    
+    # Only count failures that occurred after the last successful login/registration
+    if last_success_time:
+        failure_filters.append(Log.timestamp > last_success_time)
+        
+    failure_count_query = select(func.count(Log.id)).where(*failure_filters)
     failure_count_res = await db.execute(failure_count_query)
     failures = failure_count_res.scalar() or 0
     
@@ -154,10 +176,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Too many failed login attempts. Please try again in 15 minutes."
         )
 
-    # 2. Query user
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalars().first()
-    
+    # 3. Check credentials (we already queried the user)
     if not user or not verify_password(password, user.password_hash):
         # Log failed attempt
         fail_log = Log(
@@ -171,7 +190,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Invalid email or password."
         )
         
-    # 3. Successful authentication - issue token
+    # 4. Successful authentication - issue token
     access_token = create_access_token(data={"sub": user.email, "role": user.role})
     
     # Log login success

@@ -31,5 +31,5 @@ def check_monitoring_hours() -> tuple[bool, str, str]:
     end_time = time(15, 15)
     
     is_valid = is_weekday and (start_time <= current_time <= end_time)
-    return is_valid, now.strftime("%I:%M %p"), tz_name
+    return is_valid, now.strftime("%Y-%m-%d %I:%M:%S %p"), tz_name
 
