@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -32,7 +32,7 @@ async def get_rate_limit_stats(
         rows = limit_result.scalars().all()
         
         # Structure usage counts
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         current_minute_window = now.strftime("%Y-%m-%d %H:%M")
         current_hour_window = now.strftime("%Y-%m-%d %H")
         current_day_window = now.strftime("%Y-%m-%d")
