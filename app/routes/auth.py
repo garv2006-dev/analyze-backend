@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
 
+from backend.app import database
 from backend.app.database import get_db
 from backend.app.models.user import User
 from backend.app.models.log import Log
@@ -145,8 +146,13 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         last_success_res = await db.execute(last_success_query)
         last_success_time = last_success_res.scalar()
 
-    # 2. Login rate limit attempt check (max 5 failures in 15 mins) using timezone-aware datetimes
-    fifteen_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+    # 2. Login rate limit attempt check (max 5 failures in 15 mins)
+    if database.is_fallback_mode:
+        # Use naive UTC datetime for SQLite fallback to prevent string offset mismatch comparison bugs
+        fifteen_mins_ago = datetime.utcnow() - timedelta(minutes=15)
+    else:
+        # Use timezone-aware datetime for PostgreSQL
+        fifteen_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
     
     # Base filters for login failures
     failure_filters = [
