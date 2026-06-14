@@ -12,7 +12,7 @@ class Prediction(Base):
     confidence_score = Column(Integer, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
-    def to_dict(self, screenshot_path=None, highlighted_path=None):
+    def to_dict(self, screenshot_path=None, highlighted_path=None, stock_symbol=None):
         """Converts SQLAlchemy model to a serializable dictionary, maintaining backward compatibility for legacy frontend properties."""
         ai_res = self.ai_result or {}
         
@@ -36,7 +36,7 @@ class Prediction(Base):
 
         return {
             "id": self.id,
-            "stock_symbol": "TARGET",
+            "stock_symbol": stock_symbol or "TARGET",
             "captured_at": self.timestamp.isoformat() if self.timestamp else None,
             "image_path": img_path,
             "image_url": img_url,

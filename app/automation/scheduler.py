@@ -63,21 +63,61 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
         
         highlighted_image_path = None
         if prev_screenshot:
-            prev_abs_path = str(config.SCREENSHOTS_DIR / prev_screenshot.image_path)
-            highlight_filename = f"highlighted_{capture_result['filename']}"
+            prev_abs_path = None
+            if prev_screenshot.image_path.startswith("http://") or prev_screenshot.image_path.startswith("https://"):
+                filename_only = prev_screenshot.image_path.split("/")[-1]
+                local_path = config.SCREENSHOTS_DIR / filename_only
+                if local_path.exists():
+                    prev_abs_path = str(local_path)
+            else:
+                local_path = config.SCREENSHOTS_DIR / prev_screenshot.image_path
+                if local_path.exists():
+                    prev_abs_path = str(local_path)
+                    
+            if prev_abs_path:
+                highlight_filename = f"highlighted_{capture_result['filename']}"
+                highlighted_image_path = detect_and_highlight_changes(
+                    prev_path=prev_abs_path,
+                    curr_path=capture_result["absolute_path"],
+                    output_filename=highlight_filename
+                )
             
-            highlighted_image_path = detect_and_highlight_changes(
-                prev_path=prev_abs_path,
-                curr_path=capture_result["absolute_path"],
-                output_filename=highlight_filename
-            )
-            
+        # 3.5. Upload images to Cloudinary if enabled
+        saved_image_path = capture_result["filename"]
+        if config.IS_CLOUDINARY_ENABLED:
+            from backend.app.services.cloudinary import upload_image
+            try:
+                cloudinary_url = await asyncio.to_thread(
+                    upload_image,
+                    capture_result["absolute_path"],
+                    f"graph_{int(datetime.now().timestamp())}"
+                )
+                if cloudinary_url:
+                    saved_image_path = cloudinary_url
+            except Exception as upload_err:
+                logger.error(f"Failed to upload standard screenshot to Cloudinary: {upload_err}")
+                
+        saved_highlighted_path = highlighted_image_path
+        if highlighted_image_path and config.IS_CLOUDINARY_ENABLED:
+            from backend.app.services.cloudinary import upload_image
+            try:
+                highlighted_abs_path = str(config.SCREENSHOTS_DIR / highlighted_image_path)
+                cloudinary_url = await asyncio.to_thread(
+                    upload_image,
+                    highlighted_abs_path,
+                    f"highlighted_{int(datetime.now().timestamp())}"
+                )
+                if cloudinary_url:
+                    saved_highlighted_path = cloudinary_url
+            except Exception as upload_err:
+                logger.error(f"Failed to upload highlighted screenshot to Cloudinary: {upload_err}")
+
         # 4. Save screenshot details
         new_screenshot = Screenshot(
             user_id=user_id,
             url_id=url_id,
-            image_path=capture_result["filename"],
-            highlighted_image_path=highlighted_image_path
+            image_path=saved_image_path,
+            highlighted_image_path=saved_highlighted_path
         )
         db.add(new_screenshot)
         await db.flush() # Generate ID
@@ -129,9 +169,33 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
         await db.commit()
         
         # 6. Broadcast updates via WebSocket
+        def clean_url_local(url: str) -> str:
+            if not url:
+                return ""
+            url = url.split("?")[0]
+            url = url.rstrip("/")
+            url = url.replace("/ext/", "/")
+            url = url.replace("https://", "").replace("http://", "")
+            url = url.replace("www.groww.in", "").replace("groww.in", "")
+            return url
+            
+        from backend.app.models.saved_asset import SavedAsset
+        assets_res = await db.execute(select(SavedAsset))
+        assets = assets_res.scalars().all()
+        cleaned_target = clean_url_local(target.url)
+        symbol = "TARGET"
+        for asset in assets:
+            if clean_url_local(asset.url) == cleaned_target:
+                symbol = asset.symbol
+                break
+        if symbol == "TARGET":
+            parts = cleaned_target.split("/")
+            symbol = parts[-1].replace("-", " ").upper() if parts else "TARGET"
+
         prediction_dict = new_prediction.to_dict(
             screenshot_path=new_screenshot.image_path,
-            highlighted_path=new_screenshot.highlighted_image_path
+            highlighted_path=new_screenshot.highlighted_image_path,
+            stock_symbol=symbol
         )
         await ws_manager.broadcast({
             "success": True,

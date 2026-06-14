@@ -24,6 +24,18 @@ class BulkDeleteRequest(BaseModel):
     ids: list[int] = []
     delete_all: bool = False
 
+from backend.app.models.saved_asset import SavedAsset
+
+def clean_url(url: str) -> str:
+    if not url:
+        return ""
+    url = url.split("?")[0]
+    url = url.rstrip("/")
+    url = url.replace("/ext/", "/")
+    url = url.replace("https://", "").replace("http://", "")
+    url = url.replace("www.groww.in", "").replace("groww.in", "")
+    return url
+
 @router.get("/")
 async def get_predictions(
     page: int = Query(default=1, ge=1),
@@ -33,8 +45,8 @@ async def get_predictions(
 ):
     """Fetches a paginated list of predictions belonging to the authenticated User."""
     try:
-        # Build query joining Prediction and Screenshot
-        query = select(Prediction, Screenshot).join(Screenshot).where(
+        # Build query joining Prediction, Screenshot, and TargetURL
+        query = select(Prediction, Screenshot, TargetURL).join(Screenshot).join(TargetURL, Screenshot.url_id == TargetURL.id).where(
             Screenshot.user_id == current_user.id
         )
         
@@ -50,9 +62,27 @@ async def get_predictions(
         result = await db.execute(query)
         rows = result.all()
         
+        # Load saved assets to map URL -> symbol
+        assets_res = await db.execute(select(SavedAsset))
+        assets = assets_res.scalars().all()
+        
+        asset_map = {}
+        for asset in assets:
+            asset_map[clean_url(asset.url)] = asset.symbol
+            
         data = []
-        for p, s in rows:
-            data.append(p.to_dict(screenshot_path=s.image_path, highlighted_path=s.highlighted_image_path))
+        for p, s, t in rows:
+            cleaned_target = clean_url(t.url)
+            symbol = asset_map.get(cleaned_target)
+            if not symbol:
+                parts = cleaned_target.split("/")
+                symbol = parts[-1].replace("-", " ").upper() if parts else "TARGET"
+                
+            data.append(p.to_dict(
+                screenshot_path=s.image_path, 
+                highlighted_path=s.highlighted_image_path,
+                stock_symbol=symbol
+            ))
             
         return {
             "success": True,
@@ -72,7 +102,7 @@ async def get_predictions(
 async def get_latest_prediction(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Retrieves the single latest prediction analysis for the current user."""
     try:
-        query = select(Prediction, Screenshot).join(Screenshot).where(
+        query = select(Prediction, Screenshot, TargetURL).join(Screenshot).join(TargetURL, Screenshot.url_id == TargetURL.id).where(
             Screenshot.user_id == current_user.id
         ).order_by(Prediction.timestamp.desc()).limit(1)
         
@@ -85,10 +115,29 @@ async def get_latest_prediction(current_user: User = Depends(get_current_user), 
                 "data": None
             }
             
-        p, s = row
+        p, s, t = row
+        
+        # Resolve symbol
+        assets_res = await db.execute(select(SavedAsset))
+        assets = assets_res.scalars().all()
+        
+        cleaned_target = clean_url(t.url)
+        symbol = "TARGET"
+        for asset in assets:
+            if clean_url(asset.url) == cleaned_target:
+                symbol = asset.symbol
+                break
+        if symbol == "TARGET":
+            parts = cleaned_target.split("/")
+            symbol = parts[-1].replace("-", " ").upper() if parts else "TARGET"
+            
         return {
             "success": True,
-            "data": p.to_dict(screenshot_path=s.image_path, highlighted_path=s.highlighted_image_path)
+            "data": p.to_dict(
+                screenshot_path=s.image_path, 
+                highlighted_path=s.highlighted_image_path,
+                stock_symbol=symbol
+            )
         }
     except Exception as e:
         logger.error(f"Failed to retrieve latest prediction: {e}")
@@ -136,11 +185,26 @@ async def trigger_manual_analysis(current_user: User = Depends(get_current_user)
         screenshot_res = await db.execute(screenshot_query)
         screenshot = screenshot_res.scalars().first()
         
+        # Resolve symbol
+        assets_res = await db.execute(select(SavedAsset))
+        assets = assets_res.scalars().all()
+        
+        cleaned_target = clean_url(target.url)
+        symbol = "TARGET"
+        for asset in assets:
+            if clean_url(asset.url) == cleaned_target:
+                symbol = asset.symbol
+                break
+        if symbol == "TARGET":
+            parts = cleaned_target.split("/")
+            symbol = parts[-1].replace("-", " ").upper() if parts else "TARGET"
+            
         return {
             "success": True,
             "data": prediction.to_dict(
                 screenshot_path=screenshot.image_path if screenshot else None,
-                highlighted_path=screenshot.highlighted_image_path if screenshot else None
+                highlighted_path=screenshot.highlighted_image_path if screenshot else None,
+                stock_symbol=symbol
             )
         }
     except Exception as e:
