@@ -49,7 +49,8 @@ async def run_diagnostics():
     start_time = time(9, 15)
     end_time = time(15, 15)
     current_time = now.time()
-    expected_valid = start_time <= current_time <= end_time
+    is_weekday = now.weekday() < 5
+    expected_valid = is_weekday and (start_time <= current_time <= end_time)
     assert is_valid == expected_valid, f"Working hours calculation mismatch: calculated={is_valid}, expected={expected_valid}"
     print("[PASS] Working hours check calculations verified successfully.")
 
