@@ -1,13 +1,13 @@
 import logging
 import asyncio
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
 
 from backend.app import config
 from backend.app import database
+from backend.app.database import get_next_sequence
 from backend.app.models.user import User
 from backend.app.models.target_url import TargetURL
 from backend.app.models.screenshot import Screenshot
@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 
 scheduler = AsyncIOScheduler()
 
-async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
+async def execute_user_monitoring_cycle(db: AsyncIOMotorDatabase, target: TargetURL):
     """
     Orchestrates the screenshot capture, change detection, and AI analysis cycle
     for a single target URL. Enforces rate limits and logs audit details.
@@ -44,22 +44,23 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
     
     try:
         # 2. Capture screenshot using Playwright browser service
-        capture_log = Log(
-            user_id=user_id,
-            event_type="SCREENSHOT_CAPTURE",
-            message=f"Capturing screenshot of URL '{target_url}'..."
-        )
-        db.add(capture_log)
-        await db.commit()
+        capture_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": capture_id,
+            "user_id": user_id,
+            "event_type": "SCREENSHOT_CAPTURE",
+            "message": f"Capturing screenshot of URL '{target_url}'...",
+            "timestamp": datetime.now(timezone.utc)
+        })
         
         capture_result = await browser.capture_chart(target_url=target_url, stock_symbol="TARGET")
         
         # 3. Detect visual changes if there was a previous screenshot
-        prev_query = select(Screenshot).where(
-            Screenshot.url_id == url_id
-        ).order_by(Screenshot.timestamp.desc()).limit(1)
-        prev_res = await db.execute(prev_query)
-        prev_screenshot = prev_res.scalars().first()
+        prev_screenshot_doc = await db.screenshots.find_one(
+            {"url_id": url_id},
+            sort=[("timestamp", -1)]
+        )
+        prev_screenshot = Screenshot.from_dict(prev_screenshot_doc)
         
         highlighted_image_path = None
         if prev_screenshot:
@@ -113,23 +114,27 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
                 logger.error(f"Failed to upload highlighted screenshot to Cloudinary: {upload_err}")
 
         # 4. Save screenshot details
-        new_screenshot = Screenshot(
-            user_id=user_id,
-            url_id=url_id,
-            image_path=saved_image_path,
-            highlighted_image_path=saved_highlighted_path
-        )
-        db.add(new_screenshot)
-        await db.flush() # Generate ID
+        screenshot_id = await get_next_sequence("screenshots")
+        new_screenshot_doc = {
+            "id": screenshot_id,
+            "user_id": user_id,
+            "url_id": url_id,
+            "image_path": saved_image_path,
+            "highlighted_image_path": saved_highlighted_path,
+            "timestamp": datetime.now(timezone.utc)
+        }
+        await db.screenshots.insert_one(new_screenshot_doc)
+        new_screenshot = Screenshot.from_dict(new_screenshot_doc)
         
         # 5. Call AI reasoning (or simulation fallback) on screenshot
-        ai_log = Log(
-            user_id=user_id,
-            event_type="AI_PREDICTION",
-            message="Analyzing screenshot for visual patterns and change predictions..."
-        )
-        db.add(ai_log)
-        await db.commit()
+        ai_log_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": ai_log_id,
+            "user_id": user_id,
+            "event_type": "AI_PREDICTION",
+            "message": "Analyzing screenshot for visual patterns and change predictions...",
+            "timestamp": datetime.now(timezone.utc)
+        })
         
         ai_analysis = await ai.analyze_chart(capture_result["absolute_path"], extracted_price=None, target_url=target_url)
         
@@ -152,21 +157,26 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
             **ai_analysis.get("prediction_json", {})
         }
         
-        new_prediction = Prediction(
-            screenshot_id=new_screenshot.id,
-            ai_result=ai_result_payload,
-            confidence_score=ai_analysis["confidence_score"]
-        )
-        db.add(new_prediction)
+        prediction_id = await get_next_sequence("predictions")
+        new_prediction_doc = {
+            "id": prediction_id,
+            "screenshot_id": new_screenshot.id,
+            "ai_result": ai_result_payload,
+            "confidence_score": ai_analysis["confidence_score"],
+            "timestamp": datetime.now(timezone.utc)
+        }
+        await db.predictions.insert_one(new_prediction_doc)
+        new_prediction = Prediction.from_dict(new_prediction_doc)
         
         # Save audit success log
-        success_log = Log(
-            user_id=user_id,
-            event_type="MONITORING_CYCLE_SUCCESS",
-            message=f"Successfully captured and analyzed '{target_url}'. Changes Highlighted: {bool(highlighted_image_path)}."
-        )
-        db.add(success_log)
-        await db.commit()
+        success_log_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": success_log_id,
+            "user_id": user_id,
+            "event_type": "MONITORING_CYCLE_SUCCESS",
+            "message": f"Successfully captured and analyzed '{target_url}'. Changes Highlighted: {bool(highlighted_image_path)}.",
+            "timestamp": datetime.now(timezone.utc)
+        })
         
         # 6. Broadcast updates via WebSocket
         def clean_url_local(url: str) -> str:
@@ -180,8 +190,10 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
             return url
             
         from backend.app.models.saved_asset import SavedAsset
-        assets_res = await db.execute(select(SavedAsset))
-        assets = assets_res.scalars().all()
+        assets_cursor = db.saved_assets.find()
+        assets_docs = await assets_cursor.to_list(length=None)
+        assets = [SavedAsset.from_dict(d) for d in assets_docs]
+        
         cleaned_target = clean_url_local(target.url)
         symbol = "TARGET"
         for asset in assets:
@@ -208,15 +220,15 @@ async def execute_user_monitoring_cycle(db: AsyncSession, target: TargetURL):
         return new_prediction
         
     except Exception as e:
-        await db.rollback()
         logger.error(f"Error in execution cycle for User {user_id}: {e}")
-        fail_log = Log(
-            user_id=user_id,
-            event_type="MONITORING_CYCLE_FAILED",
-            message=f"Failed capture/AI analysis cycle: {str(e)}"
-        )
-        db.add(fail_log)
-        await db.commit()
+        fail_log_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": fail_log_id,
+            "user_id": user_id,
+            "event_type": "MONITORING_CYCLE_FAILED",
+            "message": f"Failed capture/AI analysis cycle: {str(e)}",
+            "timestamp": datetime.now(timezone.utc)
+        })
 
 async def run_pipeline_cycle():
     """
@@ -230,20 +242,22 @@ async def run_pipeline_cycle():
         # Automatically deactivate active targets when trading hours end so they do not auto-resume next day
         try:
             async with database.SessionLocal() as db:
-                result = await db.execute(select(TargetURL).where(TargetURL.status == "active"))
-                active_targets = result.scalars().all()
+                cursor = db.target_urls.find({"status": "active"})
+                active_targets_docs = await cursor.to_list(length=None)
+                active_targets = [TargetURL.from_dict(d) for d in active_targets_docs]
                 if active_targets:
                     logger.info(f"⏰ [SCHEDULER] Outside working hours ({current_time_str} {tz_name}). Deactivating {len(active_targets)} active target(s) for manual restart tomorrow.")
                     for target in active_targets:
-                        target.status = "inactive"
+                        await db.target_urls.update_one({"id": target.id}, {"$set": {"status": "inactive"}})
                         
-                        # Add a log event about automatic deactivation
-                        auto_stop_log = Log(
-                            user_id=target.user_id,
-                            event_type="MONITORING_STOP",
-                            message=f"Schedule automatically stopped at end of trading hours ({current_time_str} {tz_name})."
-                        )
-                        db.add(auto_stop_log)
+                        auto_stop_id = await get_next_sequence("logs")
+                        await db.logs.insert_one({
+                            "id": auto_stop_id,
+                            "user_id": target.user_id,
+                            "event_type": "MONITORING_STOP",
+                            "message": f"Schedule automatically stopped at end of trading hours ({current_time_str} {tz_name}).",
+                            "timestamp": datetime.now(timezone.utc)
+                        })
                         
                         # Broadcast status update via websocket so UI updates immediately
                         await ws_manager.broadcast({
@@ -252,7 +266,6 @@ async def run_pipeline_cycle():
                             "user_id": target.user_id,
                             "status": "inactive"
                         })
-                    await db.commit()
         except Exception as deact_err:
             logger.error(f"Failed to automatically deactivate targets: {deact_err}")
             
@@ -265,8 +278,9 @@ async def run_pipeline_cycle():
     active_targets = []
     try:
         async with database.SessionLocal() as db:
-            result = await db.execute(select(TargetURL).where(TargetURL.status == "active"))
-            active_targets = result.scalars().all()
+            cursor = db.target_urls.find({"status": "active"})
+            active_targets_docs = await cursor.to_list(length=None)
+            active_targets = [TargetURL.from_dict(d) for d in active_targets_docs]
     except Exception as e:
         logger.error(f"Failed to load active target URLs for scheduler: {e}")
         return
@@ -282,19 +296,20 @@ async def run_pipeline_cycle():
         async with database.SessionLocal() as session:
             try:
                 # Retrieve fresh row from session
-                res = await session.execute(select(TargetURL).where(TargetURL.id == target.id))
-                fresh_target = res.scalars().first()
+                fresh_target_doc = await session.target_urls.find_one({"id": target.id})
+                fresh_target = TargetURL.from_dict(fresh_target_doc)
                 if fresh_target and fresh_target.status == "active":
                     # Check if enough time has elapsed since the last screenshot of this target
-                    prev_query = select(Screenshot).where(
-                        Screenshot.url_id == fresh_target.id
-                    ).order_by(Screenshot.timestamp.desc()).limit(1)
-                    prev_res = await session.execute(prev_query)
-                    last_screenshot = prev_res.scalars().first()
+                    prev_screenshot_doc = await session.screenshots.find_one(
+                        {"url_id": fresh_target.id},
+                        sort=[("timestamp", -1)]
+                    )
+                    last_screenshot = Screenshot.from_dict(prev_screenshot_doc)
                     
                     if last_screenshot:
-                        from datetime import datetime, timezone
                         ts = last_screenshot.timestamp
+                        if isinstance(ts, str):
+                            ts = datetime.fromisoformat(ts)
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
                         
@@ -319,9 +334,5 @@ def start_scheduler():
     """Starts the background scheduler running the monitoring check every 1 minute."""
     logger.info("⏰ Initializing APScheduler Background Engine (Interval: 1 minute)...")
     
-    # Schedule interval check every 1 minute
     scheduler.add_job(run_pipeline_cycle, 'interval', minutes=1, id='chart_pipeline_job')
     scheduler.start()
-    
-    # We do NOT run bootstrap cycle here because that could run outside working hours
-    # or before database tables are created. We will let the scheduler check naturally.

@@ -2,8 +2,7 @@ import logging
 from typing import Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from backend.app.database import get_db
 from backend.app.models.user import User
@@ -22,14 +21,14 @@ MAX_PER_DAY = 200
 @router.get("/")
 async def get_rate_limit_stats(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """Retrieves usage statistics and configuration parameters for AI request rate limits."""
     try:
         # Load user rate limit records from DB
-        limit_query = select(RateLimit).where(RateLimit.user_id == current_user.id)
-        limit_result = await db.execute(limit_query)
-        rows = limit_result.scalars().all()
+        cursor = db.rate_limits.find({"user_id": current_user.id})
+        rows_docs = await cursor.to_list(length=100)
+        rows = [RateLimit.from_dict(r) for r in rows_docs]
         
         # Structure usage counts
         now = datetime.now(timezone.utc)
@@ -52,16 +51,14 @@ async def get_rate_limit_stats(
                 usage["day"] = row.request_count
                 
         # Fetch blocked request history
-        log_query = select(Log).where(
-            Log.event_type == "RATE_LIMIT_BLOCKED"
-        )
+        log_filter = {"event_type": "RATE_LIMIT_BLOCKED"}
         # If not admin, filter by user
         if current_user.role != "admin":
-            log_query = log_query.where(Log.user_id == current_user.id)
+            log_filter["user_id"] = current_user.id
             
-        log_query = log_query.order_by(Log.timestamp.desc()).limit(10)
-        log_result = await db.execute(log_query)
-        blocked_logs = log_result.scalars().all()
+        logs_cursor = db.logs.find(log_filter).sort("timestamp", -1).limit(10)
+        blocked_docs = await logs_cursor.to_list(length=10)
+        blocked_logs = [Log.from_dict(r) for r in blocked_docs]
         
         return {
             "success": True,

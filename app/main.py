@@ -30,13 +30,7 @@ from backend.app.routes.monitoring import router as monitoring_router
 from backend.app.routes.logs import router as logs_router
 from backend.app.routes.rate_limits import router as rate_limits_router
 
-# Import all models to ensure they are registered in SQLAlchemy metadata
-from backend.app.models.user import User  # noqa: F401
-from backend.app.models.target_url import TargetURL  # noqa: F401
-from backend.app.models.screenshot import Screenshot  # noqa: F401
-from backend.app.models.prediction import Prediction  # noqa: F401
-from backend.app.models.log import Log  # noqa: F401
-from backend.app.models.rate_limit import RateLimit  # noqa: F401
+# No SQLAlchemy model imports needed since we use MongoDB Atlas.
 
 # Set up logging configuration
 logging.basicConfig(
@@ -53,35 +47,36 @@ async def lifespan(app: FastAPI):
     """Handles startup and shutdown lifecycle operations including database and cron initialization."""
     logger.info("⚡ Server is booting up...")
     
-    # 1. Initialize active database connection (Postgres or SQLite fallback)
+    # 1. Initialize active database connection
     await database.init_database()
     
-    # 2. Dynamically create all schema tables on startup
-    logger.info("⚙️ Ensuring all relational database tables exist...")
-    async with database.engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("✔️ Database tables verified.")
-    
-    # 2b. Safe Column Migration: Ensure 'interval_minutes' column exists on 'target_urls'
-    logger.info("⚙️ Checking target_urls table schema for interval_minutes column...")
-    async with database.engine.begin() as conn:
-        try:
-            from sqlalchemy import inspect, text
-            
-            def get_columns(sync_conn):
-                inspector = inspect(sync_conn)
-                return [col["name"] for col in inspector.get_columns("target_urls")]
-            
-            columns = await conn.run_sync(get_columns)
-            if "interval_minutes" not in columns:
-                await conn.execute(text("ALTER TABLE target_urls ADD COLUMN interval_minutes INTEGER DEFAULT 5 NOT NULL"))
-                logger.info("✔️ Added missing 'interval_minutes' column to 'target_urls' table.")
-            else:
-                logger.info("ℹ️ 'interval_minutes' column already exists on 'target_urls' table.")
-        except Exception as migration_err:
-            # Clean logging of error to avoid multiline database dumps in logs
-            err_msg = str(migration_err).split("\n")[0]
-            logger.warning(f"⚠️ Safe migration check encountered an issue: {err_msg}")
+    # 2. Ensure MongoDB Indexes are created
+    logger.info("⚙️ Ensuring MongoDB collection indexes exist...")
+    try:
+        from pymongo import ASCENDING
+        # Unique index on user email
+        await database.db.users.create_index([("email", ASCENDING)], unique=True)
+        # Index on target_urls user_id
+        await database.db.target_urls.create_index([("user_id", ASCENDING)], unique=True)
+        # Index on saved_assets symbol (unique)
+        await database.db.saved_assets.create_index([("symbol", ASCENDING)], unique=True)
+        # Indexes on screenshots
+        await database.db.screenshots.create_index([("user_id", ASCENDING)])
+        await database.db.screenshots.create_index([("url_id", ASCENDING)])
+        await database.db.screenshots.create_index([("timestamp", ASCENDING)])
+        # Indexes on predictions
+        await database.db.predictions.create_index([("screenshot_id", ASCENDING)])
+        await database.db.predictions.create_index([("timestamp", ASCENDING)])
+        # Indexes on logs
+        await database.db.logs.create_index([("user_id", ASCENDING)])
+        await database.db.logs.create_index([("event_type", ASCENDING)])
+        await database.db.logs.create_index([("timestamp", ASCENDING)])
+        # Indexes on rate limits
+        await database.db.rate_limits.create_index([("user_id", ASCENDING), ("time_window", ASCENDING)], unique=True)
+        
+        logger.info("✔️ MongoDB collection indexes verified/created.")
+    except Exception as index_err:
+        logger.warning(f"⚠️ Index verification encountered an issue: {index_err}")
     
     # 3. Start the APScheduler automated pipeline engine
     start_scheduler()
@@ -145,8 +140,8 @@ async def health_check():
         memory_rss_mb = round(process.memory_info().rss / 1024 / 1024, 2)
         
         # Check database connectivity dynamically
-        db_status = "offline_fallback" if database.is_fallback_mode else "connected"
-        db_mode = "sqlite_fallback" if database.is_fallback_mode else "postgresql"
+        db_status = "connected"
+        db_mode = "mongodb"
         
         return {
             "success": True,

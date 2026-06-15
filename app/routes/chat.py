@@ -1,7 +1,6 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
 from typing import List, Optional
 from backend.app.database import get_db
@@ -91,22 +90,21 @@ def generate_synthetic_reply(messages: List[ChatMessage], prediction, symbol: st
             return "Hello! I am your Aether AI Trading Assistant. No historical predictions are loaded. Click the manual scan button to start!"
 
 @router.post("/")
-async def chat_with_ai(request: ChatRequest, db: AsyncSession = Depends(get_db)):
+async def chat_with_ai(request: ChatRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
     """Handles real-time conversation between the user and Aether AI, seeded with real technical indicators."""
     logger.info("📥 POST /api/chat request received.")
     try:
         # 1. Fetch prediction context from DB
         prediction = None
         if request.prediction_id:
-            query = select(Prediction).where(Prediction.id == request.prediction_id)
-            result = await db.execute(query)
-            prediction = result.scalars().first()
+            prediction_doc = await db.predictions.find_one({"id": request.prediction_id})
+            prediction = Prediction.from_dict(prediction_doc)
         
         if not prediction:
             # Fallback to the latest prediction if no ID was provided or requested ID not found
-            query = select(Prediction).order_by(Prediction.timestamp.desc()).limit(1)
-            result = await db.execute(query)
-            prediction = result.scalars().first()
+            latest_docs = await db.predictions.find().sort("timestamp", -1).limit(1).to_list(1)
+            if latest_docs:
+                prediction = Prediction.from_dict(latest_docs[0])
 
         prediction_context = ""
         symbol = "the asset"
@@ -175,7 +173,6 @@ Guidelines:
                 logger.info("🧠 Dispatching chat query to Google GenAI (Gemini) native client...")
                 contents = []
                 for msg in request.messages:
-                    # Gemini expects 'user' or 'model' roles
                     role = "user" if msg.role == "user" else "model"
                     contents.append(types.Content(
                         role=role,

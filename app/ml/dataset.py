@@ -1,8 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sqlalchemy.future import select
-from backend.app.models.prediction import StockPrediction
+from backend.app.models.prediction import Prediction
 
 # Standard mapping for categorical labels
 SYMBOL_MAP = {"NIFTY": 0, "NIFTY50": 0, "BANKNIFTY": 1, "SENSEX": 2, "RELIANCE": 3, "JIO": 4, "HDFC": 5, "OTHER": 6}
@@ -25,19 +24,30 @@ class StockPredictionDataset(Dataset):
             symbol_idx = SYMBOL_MAP.get(clean_symbol, SYMBOL_MAP["OTHER"])
             
             # 2. Parse Date/Time features
-            dt = record.captured_at
+            dt = record.timestamp
+            # In MongoDB, dt is datetime.datetime or string
+            if isinstance(dt, str):
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(dt)
+                except Exception:
+                    dt = datetime.now()
+            elif not dt:
+                from datetime import datetime
+                dt = datetime.now()
+                
             hour_feat = dt.hour / 24.0
             day_feat = dt.weekday() / 7.0
             
             # 3. Parse target regression levels
-            prediction_json = record.prediction_json or {}
+            prediction_json = record.ai_result or {}
             current_price = float(prediction_json.get("current_value", 0))
             if current_price == 0:
                 continue # skip uninitialized values
                 
             # Scale-normalize prices relative to current price to make model invariant to actual stock price range!
-            s_levels = record.support_levels or []
-            r_levels = record.resistance_levels or []
+            s_levels = record.ai_result.get("support_levels", [])
+            r_levels = record.ai_result.get("resistance_levels", [])
             
             # Fallbacks if list lengths vary
             s1 = float(s_levels[0]) / current_price if len(s_levels) > 0 else 0.985
@@ -49,12 +59,11 @@ class StockPredictionDataset(Dataset):
             
             # Pack input features
             # Inputs: [normalized_current_price, hour, day_of_week]
-            # Since current price is relative, we can pass it normalized or raw
             self.numerical_features.append([current_price, hour_feat, day_feat])
             self.symbol_indices.append(symbol_idx)
             
             # Pack target labels
-            trend_str = record.trend_direction.upper().strip()
+            trend_str = record.ai_result.get("trend_direction", "SIDEWAYS").upper().strip()
             self.trend_labels.append(TREND_MAP.get(trend_str, TREND_MAP["SIDEWAYS"]))
             self.regression_labels.append([confidence, s1, s2, r1, r2])
             
@@ -85,16 +94,15 @@ class StockPredictionDataset(Dataset):
 
 async def compile_training_dataset(db_session):
     """
-    Queries SQLAlchemy database for all authentic AI predictions (is_mock == False)
+    Queries MongoDB database for all authentic AI predictions (is_mock == False)
     and returns a clean PyTorch Dataset.
     """
-    # Fetch only authentic high-quality vision predictions (is_mock is False)
-    query = select(StockPrediction)
-    result = await db_session.execute(query)
-    records = result.scalars().all()
+    cursor = db_session.predictions.find()
+    records_docs = await cursor.to_list(length=None)
+    records = [Prediction.from_dict(d) for d in records_docs]
     
     # Filter for real predictions (non-mock) to train our local network on actual AI reasoning
-    real_records = [r for r in records if not r.prediction_json.get("is_mock", False)]
+    real_records = [r for r in records if not r.ai_result.get("is_mock", False)]
     
     if len(real_records) < 5:
         # Fallback to include mock records if database is empty, to allow debugging the training loop

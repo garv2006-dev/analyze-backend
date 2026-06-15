@@ -1,9 +1,7 @@
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from sqlalchemy import func
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from backend.app.database import get_db
 from backend.app.models.user import User
@@ -20,34 +18,32 @@ async def get_logs(
     event_type: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """Fetches paginated event logs, supporting event type filters and text search queries."""
     try:
-        # Build query
-        query = select(Log)
+        # Build MongoDB query filter
+        query_filter = {}
         
         # If user is admin, they can see all logs. Otherwise, they can only see their own logs.
         if current_user.role != "admin":
-            query = query.where(Log.user_id == current_user.id)
+            query_filter["user_id"] = current_user.id
             
         if event_type and event_type.upper() != "ALL":
-            query = query.where(Log.event_type == event_type.upper())
+            query_filter["event_type"] = event_type.upper()
             
         if search:
-            query = query.where(Log.message.ilike(f"%{search}%"))
+            query_filter["message"] = {"$regex": re_escape(search), "$options": "i"}
             
-        # Count query
-        count_query = select(func.count()).select_from(query.subquery())
-        count_res = await db.execute(count_query)
-        total = count_res.scalar() or 0
+        # Count total documents matching query
+        total = await db.logs.count_documents(query_filter)
         
-        # Paginate and order descending
+        # Paginate and order by timestamp descending
         offset = (page - 1) * page_size
-        query = query.order_by(Log.timestamp.desc()).offset(offset).limit(page_size)
+        cursor = db.logs.find(query_filter).sort("timestamp", -1).skip(offset).limit(page_size)
+        rows_docs = await cursor.to_list(length=page_size)
         
-        result = await db.execute(query)
-        rows = result.scalars().all()
+        rows = [Log.from_dict(r) for r in rows_docs]
         
         return {
             "success": True,
@@ -62,3 +58,8 @@ async def get_logs(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve monitoring logs from database."
         )
+
+def re_escape(text: str) -> str:
+    """Escapes special regex characters in search string."""
+    import re
+    return re.escape(text)

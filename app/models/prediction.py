@@ -1,19 +1,27 @@
-from sqlalchemy import Column, Integer, DateTime, ForeignKey, JSON
-from sqlalchemy.sql import func
-from backend.app.database import Base
+from datetime import timezone
 from backend.app.config import BACKEND_URL
 
-class Prediction(Base):
-    __tablename__ = "predictions"
+class Prediction:
+    def __init__(self, id, screenshot_id, ai_result, confidence_score, timestamp=None):
+        self.id = id
+        self.screenshot_id = screenshot_id
+        self.ai_result = ai_result
+        self.confidence_score = confidence_score
+        self.timestamp = timestamp
 
-    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    screenshot_id = Column(Integer, ForeignKey("screenshots.id", ondelete="CASCADE"), nullable=False, index=True)
-    ai_result = Column(JSON, nullable=False) # JSON details containing supports, resistances, summaries, sentiment
-    confidence_score = Column(Integer, nullable=False)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    @classmethod
+    def from_dict(cls, data):
+        if not data:
+            return None
+        return cls(
+            id=data.get("id"),
+            screenshot_id=data.get("screenshot_id"),
+            ai_result=data.get("ai_result"),
+            confidence_score=data.get("confidence_score"),
+            timestamp=data.get("timestamp")
+        )
 
     def to_dict(self, screenshot_path=None, highlighted_path=None, stock_symbol=None):
-        """Converts SQLAlchemy model to a serializable dictionary, maintaining backward compatibility for legacy frontend properties."""
         ai_res = self.ai_result or {}
         
         support_levels = ai_res.get("support_levels", [])
@@ -33,13 +41,15 @@ class Prediction(Base):
         img_url = img_path if (img_path and (img_path.startswith("http://") or img_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{img_path}" if img_path else "")
         
         highlight_url = highlighted_path if (highlighted_path and (highlighted_path.startswith("http://") or highlighted_path.startswith("https://"))) else (f"{BACKEND_URL}/screenshots/{highlighted_path}" if highlighted_path else None)
-
+        
         ts = self.timestamp
         if ts:
-            from datetime import timezone
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            captured_at_str = ts.isoformat()
+            if hasattr(ts, "tzinfo"):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                captured_at_str = ts.isoformat()
+            else:
+                captured_at_str = str(ts)
         else:
             captured_at_str = None
 

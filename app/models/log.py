@@ -1,23 +1,34 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.sql import func
-from backend.app.database import Base
+from datetime import timezone
 
-class Log(Base):
-    __tablename__ = "logs"
+class Log:
+    def __init__(self, id, user_id, event_type, message, timestamp=None):
+        self.id = id
+        self.user_id = user_id
+        self.event_type = event_type
+        self.message = message
+        self.timestamp = timestamp
 
-    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
-    event_type = Column(String(50), nullable=False, index=True) # "MONITORING_START", "MONITORING_STOP", "SCREENSHOT_CAPTURE", "AI_PREDICTION", "RATE_LIMIT_BLOCKED", "AUTH_LOGIN", "AUTH_REGISTER"
-    message = Column(Text, nullable=False)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    @classmethod
+    def from_dict(cls, data):
+        if not data:
+            return None
+        return cls(
+            id=data.get("id"),
+            user_id=data.get("user_id"),
+            event_type=data.get("event_type"),
+            message=data.get("message"),
+            timestamp=data.get("timestamp")
+        )
 
     def to_dict(self):
         ts = self.timestamp
         if ts:
-            from datetime import timezone
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            timestamp_str = ts.isoformat()
+            if hasattr(ts, "tzinfo"):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                timestamp_str = ts.isoformat()
+            else:
+                timestamp_str = str(ts)
         else:
             timestamp_str = None
 
