@@ -23,12 +23,27 @@ async def init_database():
     from pathlib import Path
     from urllib.parse import urlparse
     
-    # In production on Render/Cloud, if no DATABASE_URL is set, avoid trying localhost and fall back to SQLite immediately.
     is_render = os.getenv("RENDER") == "true"
     is_production = config.ENV == "production"
     has_db_url = bool(os.getenv("DATABASE_URL"))
+    db_type = os.getenv("DB_TYPE", "postgres").lower()
     
-    if (is_render or is_production) and not has_db_url:
+    if db_type == "sqlite":
+        is_fallback_mode = True
+        persistent_dir = Path("/data")
+        if persistent_dir.exists() and os.access(persistent_dir, os.W_OK):
+            sqlite_db_path = persistent_dir / "fallback.db"
+            logger.info(f"💾 SQLite mode active. Using persistent SQLite database at: {sqlite_db_path}")
+        else:
+            sqlite_db_path = config.BACKEND_DIR / "fallback.db"
+            logger.info(f"💾 SQLite mode active. Using ephemeral SQLite database at: {sqlite_db_path}")
+            
+        sqlite_url = f"sqlite+aiosqlite:///{sqlite_db_path}"
+        engine = create_async_engine(
+            sqlite_url,
+            connect_args={"check_same_thread": False}
+        )
+    elif (is_render or is_production) and not has_db_url:
         logger.warning(
             "\n⚠️ =======================================================\n"
             "⚠️ DATABASE CONFIGURATION WARNING:\n"
