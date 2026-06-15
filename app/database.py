@@ -87,10 +87,39 @@ async def init_database():
             logger.info("✔️ Successfully connected to PostgreSQL.")
             
         except Exception as pg_error:
+            # Analyze error and host to provide clear troubleshooting advice
+            err_msg = str(pg_error)
+            hints = []
+            
+            # Extract host for analysis
+            host_lower = ""
+            try:
+                url_to_parse = config.ASYNC_DATABASE_URL
+                if "@" in url_to_parse:
+                    host_part = url_to_parse.split("@", 1)[1]
+                    host_lower = host_part.split("/", 1)[0].split(":", 1)[0].lower()
+            except Exception:
+                pass
+                
+            if "localhost" in host_lower or "127.0.0.1" in host_lower or not host_lower:
+                hints.append("👉 HINT: The connection is pointing to 'localhost'. On Render, you must set the 'DATABASE_URL' environment variable in your Render Dashboard to point to your live Render PostgreSQL instance.")
+            elif "render.com" in host_lower or "oregon-postgres" in host_lower:
+                hints.append("👉 HINT: Connection to Render PostgreSQL was refused. Please verify:")
+                hints.append("   1. Is your database active? Render Free databases suspend after 90 days of inactivity.")
+                hints.append("   2. Are your Web Service and Database in the same region? If so, use the 'Internal Database URL' for secure, instant connection.")
+                hints.append("   3. If using the 'External Database URL', ensure you have added '0.0.0.0/0' to the Access Control List (ACL) in your Render PostgreSQL settings.")
+            else:
+                hints.append("👉 HINT: Please check if your remote database is online, active, and that credentials and port in 'DATABASE_URL' are correct.")
+                
+            if "getaddrinfo failed" in err_msg or "Name or service not known" in err_msg:
+                hints.append("👉 HINT: The database hostname could not be resolved. Double-check your connection string spelling in the Render Dashboard.")
+
             logger.warning(f"\n⚠️ =======================================================")
             logger.warning(f"⚠️ DATABASE CONNECTION WARNING:")
             logger.warning(f"⚠️ PostgreSQL connection initialization failed.")
             logger.warning(f"⚠️ Details: {pg_error}")
+            for hint in hints:
+                logger.warning(f"⚠️ {hint}")
             logger.warning(f"⚠️ Automatically falling back to SQLite LOCAL DATABASE mode.")
             logger.warning(f"⚠️ NOTE: Logs will be persisted locally inside fallback.db!")
             logger.warning(f"⚠️ =======================================================\n")
