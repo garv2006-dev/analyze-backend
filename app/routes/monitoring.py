@@ -1,10 +1,10 @@
 import logging
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from datetime import datetime, timezone
 
-from backend.app.database import get_db
+from backend.app.database import get_db, get_next_sequence
 from backend.app.models.user import User
 from backend.app.models.target_url import TargetURL
 from backend.app.models.log import Log
@@ -21,10 +21,10 @@ class StatusUpdateRequest(BaseModel):
     status: str # "active", "inactive"
 
 @router.get("/status")
-async def get_monitoring_status(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_monitoring_status(current_user: User = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Retrieves the active monitoring status for the user's target URL."""
-    result = await db.execute(select(TargetURL).where(TargetURL.user_id == current_user.id))
-    target = result.scalars().first()
+    target_doc = await db.target_urls.find_one({"user_id": current_user.id})
+    target = TargetURL.from_dict(target_doc)
     
     if not target:
         return {
@@ -49,7 +49,7 @@ async def get_monitoring_status(current_user: User = Depends(get_current_user), 
 async def update_monitoring_status(
     body: StatusUpdateRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """Starts or stops monitoring. Validates working hours if attempting to activate."""
     new_status = body.status.strip().lower()
@@ -59,8 +59,8 @@ async def update_monitoring_status(
             detail="Status must be either 'active' or 'inactive'."
         )
         
-    result = await db.execute(select(TargetURL).where(TargetURL.user_id == current_user.id))
-    target = result.scalars().first()
+    target_doc = await db.target_urls.find_one({"user_id": current_user.id})
+    target = TargetURL.from_dict(target_doc)
     
     if not target:
         raise HTTPException(
@@ -73,13 +73,14 @@ async def update_monitoring_status(
         is_valid, current_time_str, tz_name = check_monitoring_hours()
         if not is_valid:
             # Audit log the attempt
-            audit_log = Log(
-                user_id=current_user.id,
-                event_type="MONITORING_START_BLOCKED",
-                message=f"Attempted to start monitoring outside allowed hours ({current_time_str} {tz_name})."
-            )
-            db.add(audit_log)
-            await db.commit()
+            audit_id = await get_next_sequence("logs")
+            await db.logs.insert_one({
+                "id": audit_id,
+                "user_id": current_user.id,
+                "event_type": "MONITORING_START_BLOCKED",
+                "message": f"Attempted to start monitoring outside allowed hours ({current_time_str} {tz_name}).",
+                "timestamp": datetime.now(timezone.utc)
+            })
             
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -87,23 +88,27 @@ async def update_monitoring_status(
             )
             
     # Update status
-    target.status = new_status
+    now = datetime.now(timezone.utc)
+    await db.target_urls.update_one(
+        {"id": target.id},
+        {"$set": {"status": new_status, "updated_at": now}}
+    )
     
     # Audit log
     event = "MONITORING_START" if new_status == "active" else "MONITORING_STOP"
     message = f"User started monitoring for URL '{target.url}'." if new_status == "active" else f"User stopped monitoring for URL '{target.url}'."
     
-    audit_log = Log(
-        user_id=current_user.id,
-        event_type=event,
-        message=message
-    )
-    db.add(audit_log)
-    await db.commit()
-    await db.refresh(target)
+    audit_id = await get_next_sequence("logs")
+    await db.logs.insert_one({
+        "id": audit_id,
+        "user_id": current_user.id,
+        "event_type": event,
+        "message": message,
+        "timestamp": now
+    })
     
     return {
         "success": True,
-        "status": target.status,
+        "status": new_status,
         "message": f"Monitoring successfully {new_status}."
     }

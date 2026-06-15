@@ -3,10 +3,10 @@ import re
 from pathlib import Path
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from datetime import datetime, timezone
 
-from backend.app.database import get_db
+from backend.app.database import get_db, get_next_sequence
 from backend.app.models.user import User
 from backend.app.models.target_url import TargetURL
 from backend.app.models.log import Log
@@ -28,17 +28,17 @@ def validate_url(url: str) -> bool:
     return bool(re.match(url_regex, url))
 
 @router.get("/")
-async def get_target_url(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_target_url(current_user: User = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Fetches the current user's target URL, returning null if none is configured."""
-    result = await db.execute(select(TargetURL).where(TargetURL.user_id == current_user.id))
-    target = result.scalars().first()
+    target_doc = await db.target_urls.find_one({"user_id": current_user.id})
+    target = TargetURL.from_dict(target_doc)
     return {
         "success": True,
         "data": target.to_dict() if target else None
     }
 
 @router.post("/")
-async def create_target_url(body: TargetURLRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def create_target_url(body: TargetURLRequest, current_user: User = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Configures a target URL for the user, enforcing the single active URL restriction and validating the URL."""
     url = body.url.strip()
     
@@ -50,9 +50,8 @@ async def create_target_url(body: TargetURLRequest, current_user: User = Depends
         )
         
     # 2. Check if the user already has a configured URL
-    existing_result = await db.execute(select(TargetURL).where(TargetURL.user_id == current_user.id))
-    existing = existing_result.scalars().first()
-    if existing:
+    existing_doc = await db.target_urls.find_one({"user_id": current_user.id})
+    if existing_doc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You can configure only one target URL. Delete the existing one first to update."
@@ -88,31 +87,36 @@ async def create_target_url(body: TargetURLRequest, current_user: User = Depends
         
     # 3. Create and save the new target URL
     try:
-        new_target = TargetURL(
-            user_id=current_user.id,
-            url=url,
-            interval_minutes=body.interval_minutes,
-            status="inactive" # Start as inactive; user must click "Start Monitoring" to enable it
-        )
-        db.add(new_target)
-        await db.commit()
-        await db.refresh(new_target)
+        target_id = await get_next_sequence("target_urls")
+        now = datetime.now(timezone.utc)
+        
+        new_target_doc = {
+            "id": target_id,
+            "user_id": current_user.id,
+            "url": url,
+            "interval_minutes": body.interval_minutes,
+            "status": "inactive", # Start as inactive; user must click "Start Monitoring" to enable it
+            "created_at": now,
+            "updated_at": now
+        }
+        await db.target_urls.insert_one(new_target_doc)
+        new_target = TargetURL.from_dict(new_target_doc)
         
         # Log successful audit event
-        audit_log = Log(
-            user_id=current_user.id,
-            event_type="URL_CREATE",
-            message=f"Configured target URL: '{url}'"
-        )
-        db.add(audit_log)
-        await db.commit()
+        audit_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": audit_id,
+            "user_id": current_user.id,
+            "event_type": "URL_CREATE",
+            "message": f"Configured target URL: '{url}'",
+            "timestamp": now
+        })
         
         return {
             "success": True,
             "data": new_target.to_dict()
         }
     except Exception as e:
-        await db.rollback()
         logger.error(f"Failed to create target URL: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -120,29 +124,29 @@ async def create_target_url(body: TargetURLRequest, current_user: User = Depends
         )
 
 @router.delete("/")
-async def delete_target_url(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def delete_target_url(current_user: User = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Deletes the user's active target URL, resetting their monitoring session."""
     try:
         # Find the existing target URL
-        result = await db.execute(select(TargetURL).where(TargetURL.user_id == current_user.id))
-        target = result.scalars().first()
-        if not target:
+        target_doc = await db.target_urls.find_one({"user_id": current_user.id})
+        if not target_doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No target URL found to delete."
             )
             
-        url_deleted = target.url
-        await db.delete(target)
+        url_deleted = target_doc.get("url")
+        await db.target_urls.delete_one({"user_id": current_user.id})
         
         # Log audit log
-        audit_log = Log(
-            user_id=current_user.id,
-            event_type="URL_DELETE",
-            message=f"Deleted target URL: '{url_deleted}'"
-        )
-        db.add(audit_log)
-        await db.commit()
+        audit_id = await get_next_sequence("logs")
+        await db.logs.insert_one({
+            "id": audit_id,
+            "user_id": current_user.id,
+            "event_type": "URL_DELETE",
+            "message": f"Deleted target URL: '{url_deleted}'",
+            "timestamp": datetime.now(timezone.utc)
+        })
         
         return {
             "success": True,
@@ -151,7 +155,6 @@ async def delete_target_url(current_user: User = Depends(get_current_user), db: 
     except HTTPException:
         raise
     except Exception as e:
-        await db.rollback()
         logger.error(f"Failed to delete target URL: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -16,38 +16,20 @@ PORT = int(os.getenv("PORT", 5000))
 ENV = os.getenv("NODE_ENV", "development")
 BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 
-# PostgreSQL Database Configuration
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "12345678")
+# MongoDB Database Configuration
 DB_NAME = os.getenv("DB_NAME", "graph_analysis_db")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", 5432))
 
-# Database connection URLs
+# Connection URL
+# Default fallback to the user's MongoDB Atlas cluster URL if not set in env
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-if DATABASE_URL:
-    # Render and other platforms often provide 'postgres://' which needs to be 'postgresql://' for SQLAlchemy
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    
-    # Construct ASYNC_DATABASE_URL by inserting '+asyncpg'
-    if "postgresql+asyncpg://" not in DATABASE_URL:
-        ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-    else:
-        ASYNC_DATABASE_URL = DATABASE_URL
-        
-    # asyncpg expects 'ssl=require' instead of 'sslmode=require'
-    if "sslmode=require" in ASYNC_DATABASE_URL:
-        ASYNC_DATABASE_URL = ASYNC_DATABASE_URL.replace("sslmode=require", "ssl=require")
-    elif "sslmode=" in ASYNC_DATABASE_URL:
-        ASYNC_DATABASE_URL = ASYNC_DATABASE_URL.replace("sslmode=", "ssl=")
-        
-    SYNC_DATABASE_URL = DATABASE_URL
+if not DATABASE_URL or not (DATABASE_URL.startswith("mongodb://") or DATABASE_URL.startswith("mongodb+srv://")):
+    DATABASE_URL = f"mongodb+srv://garv_v:garv_mongo@cluster0.yanhksc.mongodb.net/{DB_NAME}?retryWrites=true&w=majority"
 else:
-    # asyncpg for FastAPI async requests
-    ASYNC_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    # psycopg2 for migrations/sync check
-    SYNC_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # If a custom database URL is provided, ensure any placeholder <database_name> is substituted
+    if "<database_name >" in DATABASE_URL:
+        DATABASE_URL = DATABASE_URL.replace("<database_name >", DB_NAME)
+    elif "<database_name>" in DATABASE_URL:
+        DATABASE_URL = DATABASE_URL.replace("<database_name>", DB_NAME)
 
 # AI Vision Credentials
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

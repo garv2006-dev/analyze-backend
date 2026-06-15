@@ -7,8 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from backend.app.database import get_db
 from backend.app.models.user import User
@@ -69,7 +68,7 @@ def decode_access_token(token: str) -> Optional[dict]:
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ) -> User:
     """FastAPI dependency to extract and return the authenticated User from request headers."""
     if not credentials:
@@ -91,8 +90,8 @@ async def get_current_user(
             detail="Invalid token payload."
         )
     
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalars().first()
+    user_doc = await db.users.find_one({"email": email})
+    user = User.from_dict(user_doc)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

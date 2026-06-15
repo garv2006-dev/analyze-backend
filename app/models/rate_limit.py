@@ -1,15 +1,22 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.sql import func
-from backend.app.database import Base
+class RateLimit:
+    def __init__(self, id, user_id, request_count=0, time_window="", last_request_time=None):
+        self.id = id
+        self.user_id = user_id
+        self.request_count = request_count
+        self.time_window = time_window
+        self.last_request_time = last_request_time
 
-class RateLimit(Base):
-    __tablename__ = "rate_limits"
-
-    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    request_count = Column(Integer, default=0, nullable=False)
-    time_window = Column(String(50), nullable=False, index=True) # e.g. "2026-06-12_14:55_min", "2026-06-12_14_hour", "2026-06-12_day"
-    last_request_time = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    @classmethod
+    def from_dict(cls, data):
+        if not data:
+            return None
+        return cls(
+            id=data.get("id"),
+            user_id=data.get("user_id"),
+            request_count=data.get("request_count", 0),
+            time_window=data.get("time_window", ""),
+            last_request_time=data.get("last_request_time")
+        )
 
     def to_dict(self):
         return {
@@ -17,5 +24,5 @@ class RateLimit(Base):
             "user_id": self.user_id,
             "request_count": self.request_count,
             "time_window": self.time_window,
-            "last_request_time": self.last_request_time.isoformat() if self.last_request_time else None,
+            "last_request_time": self.last_request_time.isoformat() if hasattr(self.last_request_time, "isoformat") else self.last_request_time,
         }
