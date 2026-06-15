@@ -35,6 +35,13 @@ if DATABASE_URL:
         ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
     else:
         ASYNC_DATABASE_URL = DATABASE_URL
+        
+    # asyncpg expects 'ssl=require' instead of 'sslmode=require'
+    if "sslmode=require" in ASYNC_DATABASE_URL:
+        ASYNC_DATABASE_URL = ASYNC_DATABASE_URL.replace("sslmode=require", "ssl=require")
+    elif "sslmode=" in ASYNC_DATABASE_URL:
+        ASYNC_DATABASE_URL = ASYNC_DATABASE_URL.replace("sslmode=", "ssl=")
+        
     SYNC_DATABASE_URL = DATABASE_URL
 else:
     # asyncpg for FastAPI async requests
